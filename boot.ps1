@@ -6,107 +6,303 @@ Write-Output "Args for script: $Args"
 $ProgressPreference = 'SilentlyContinue'
 
 # Check if WinGet is installed and get version
+# According to Microsoft documentation: https://learn.microsoft.com/en-us/windows/package-manager/
+# WinGet is included in Windows 10 version 1809+ and Windows 11 as part of App Installer
 $wingetInstalled = $false
 $isWinGetRecent = $null
 
-try {
-    $wingetVersion = winget -v 2>$null
-    if ($wingetVersion) {
-        $wingetInstalled = $true
-        $isWinGetRecent = $wingetVersion.Trim('v').TrimEnd("-preview").split('.')
+# Function to check if WinGet is available and get version
+function Test-WinGetInstalled {
+    try {
+        # Use --info for better compatibility (recommended by Microsoft docs)
+        $wingetInfo = winget --info 2>$null
+        if ($wingetInfo) {
+            # Extract version from --info output or use -v
+            $wingetVersion = winget -v 2>$null
+            if ($wingetVersion) {
+                return @{
+                    Installed = $true
+                    Version = $wingetVersion
+                    VersionArray = $wingetVersion.Trim('v').TrimEnd("-preview").split('.')
+                }
+            }
+        }
+    } catch {
+        # WinGet not available
     }
-} catch {
-    $wingetInstalled = $false
+    
+    # Also check if App Installer package is installed (which includes WinGet)
+    $appInstaller = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
+    if ($appInstaller) {
+        return @{
+            Installed = $true
+            Version = $null
+            VersionArray = $null
+            AppInstallerInstalled = $true
+        }
+    }
+    
+    return @{
+        Installed = $false
+        Version = $null
+        VersionArray = $null
+    }
 }
+
+$wingetStatus = Test-WinGetInstalled
+$wingetInstalled = $wingetStatus.Installed
+$isWinGetRecent = $wingetStatus.VersionArray
 
 # forcing WinGet to be installed if not present or version is too old
 if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
 {
    Write-Host "Downloading WinGet and its dependencies..."
    
-   # Download Windows App Runtime first (required dependency for newer WinGet versions)
-   $appRuntimePath = "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.msix"
-   Write-Host "Downloading: Windows App Runtime 1.8 (required dependency)"
-   try {
-       # Try direct download from Microsoft
-       $appRuntimeUri = "https://aka.ms/windowsappruntime/1.8/x64"
-       Invoke-WebRequest -Uri $appRuntimeUri -OutFile $appRuntimePath -ErrorAction Stop
-       Write-Host "Windows App Runtime downloaded successfully"
-   } catch {
-       Write-Warning "Failed to download Windows App Runtime from primary source: $_"
-       Write-Host "Attempting to download from Microsoft Store or skipping..."
-       # If download fails, we'll try to install WinGet anyway - it may work on some systems
-       $appRuntimePath = $null
+   # Function to check if a package is already installed
+   function Test-AppxPackageInstalled {
+       param([string]$PackageName)
+       $installed = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
+       return ($null -ne $installed)
+   }
+   
+   # Function to validate downloaded file
+   function Test-FileValid {
+       param([string]$FilePath, [long]$MinSizeBytes = 1000)
+       if (-not (Test-Path $FilePath)) {
+           return $false
+       }
+       $fileInfo = Get-Item $FilePath -ErrorAction SilentlyContinue
+       if ($null -eq $fileInfo) {
+           return $false
+       }
+       # Check if file size is reasonable (at least MinSizeBytes)
+       if ($fileInfo.Length -lt $MinSizeBytes) {
+           Write-Warning "File $FilePath appears to be too small ($($fileInfo.Length) bytes), may be corrupted"
+           return $false
+       }
+       return $true
+   }
+   
+   # Check if Windows App Runtime is already installed
+   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+   $appRuntimePath = $null
+   
+   if (-not $appRuntimeInstalled) {
+       Write-Host "Windows App Runtime not found, attempting to install..."
+       $appRuntimePath = "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.msix"
+       
+       # Try multiple download methods for Windows App Runtime
+       $appRuntimeUris = @(
+           "https://aka.ms/windowsappruntime/1.8/x64"
+       )
+       
+       $appRuntimeDownloaded = $false
+       foreach ($appRuntimeUri in $appRuntimeUris) {
+           try {
+               Write-Host "Downloading: Windows App Runtime 1.8 from $appRuntimeUri"
+               # Remove existing file if present
+               if (Test-Path $appRuntimePath) {
+                   Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
+               }
+               Invoke-WebRequest -Uri $appRuntimeUri -OutFile $appRuntimePath -ErrorAction Stop
+               
+               # Validate downloaded file
+               if (Test-FileValid -FilePath $appRuntimePath -MinSizeBytes 50000000) {
+                   Write-Host "Windows App Runtime downloaded successfully"
+                   $appRuntimeDownloaded = $true
+                   break
+               } else {
+                   Write-Warning "Downloaded file appears invalid, trying next source..."
+                   Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
+               }
+           } catch {
+               Write-Warning "Failed to download from $appRuntimeUri : $_"
+               if (Test-Path $appRuntimePath) {
+                   Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
+               }
+           }
+       }
+       
+       if (-not $appRuntimeDownloaded) {
+           Write-Warning "Could not download Windows App Runtime. Will try installing via Microsoft Store or continue without it."
+           # Try to install via Microsoft Store using PowerShell
+           try {
+               Write-Host "Attempting to install Windows App Runtime via Microsoft Store..."
+               Start-Process "ms-windows-store://pdp/?ProductId=9P7KNL5RWT25" -ErrorAction Stop
+               Write-Host "Opened Microsoft Store for Windows App Runtime. Please install it if prompted."
+               Start-Sleep -Seconds 5
+               # Check if it got installed
+               $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+               if ($appRuntimeInstalled) {
+                   Write-Host "Windows App Runtime installed via Microsoft Store"
+               }
+           } catch {
+               Write-Warning "Could not open Microsoft Store for Windows App Runtime: $_"
+           }
+           $appRuntimePath = $null
+       }
+   } else {
+       Write-Host "Windows App Runtime already installed"
    }
    
    # Download other dependencies
-   $paths = "Microsoft.VCLibs.x64.14.00.Desktop.appx", "Microsoft.UI.Xaml.2.8.x64.appx", "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-   $uris = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx", "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx", "https://aka.ms/getwinget"
+   $paths = @()
+   $uris = @()
+   $fileNames = @()
    
+   # VCLibs
+   if (-not (Test-AppxPackageInstalled -PackageName "Microsoft.VCLibs.140.00")) {
+       $paths += "Microsoft.VCLibs.x64.14.00.Desktop.appx"
+       $uris += "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"
+       $fileNames += "VCLibs"
+   } else {
+       Write-Host "VCLibs already installed"
+   }
+   
+   # UI.Xaml
+   if (-not (Test-AppxPackageInstalled -PackageName "Microsoft.UI.Xaml.2.8")) {
+       $paths += "Microsoft.UI.Xaml.2.8.x64.appx"
+       $uris += "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"
+       $fileNames += "UI.Xaml"
+   } else {
+       Write-Host "UI.Xaml already installed"
+   }
+   
+   # WinGet bundle
+   $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+   $paths += $wingetBundlePath
+   $uris += "https://aka.ms/getwinget"
+   $fileNames += "WinGet"
+   
+   # Download dependencies
    for ($i = 0; $i -lt $uris.Length; $i++) {
        $filePath = $paths[$i]
        $fileUri = $uris[$i]
-       Write-Host "Downloading: ($filePath) from $fileUri"
-       Invoke-WebRequest -Uri $fileUri -OutFile $filePath
+       $fileName = $fileNames[$i]
+       Write-Host "Downloading: $fileName from $fileUri"
+       try {
+           if (Test-Path $filePath) {
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+           }
+           Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
+           
+           # Validate downloaded file
+           $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
+           if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
+               Write-Warning "$fileName download appears invalid, will retry or skip"
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+               $paths[$i] = $null
+           }
+       } catch {
+           Write-Warning "Failed to download $fileName : $_"
+           if (Test-Path $filePath) {
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+           }
+           $paths[$i] = $null
+       }
    }
    
    Write-Host "Installing WinGet and its dependencies..."
    
    # Install Windows App Runtime first if downloaded
-   if (Test-Path $appRuntimePath) {
+   if ($null -ne $appRuntimePath -and (Test-Path $appRuntimePath)) {
        Write-Host "Installing: Windows App Runtime"
        try {
            Add-AppxPackage $appRuntimePath -ErrorAction Stop
+           Write-Host "Windows App Runtime installed successfully"
        } catch {
            Write-Warning "Windows App Runtime installation failed: $_"
+           Write-Host "Trying alternative installation method..."
+           # Try installing via Microsoft Store
+           try {
+               Start-Process "ms-windows-store://pdp/?ProductId=9P7KNL5RWT25" -ErrorAction Stop
+               Write-Host "Opened Microsoft Store for Windows App Runtime. Please install it manually if needed."
+               Start-Sleep -Seconds 2
+           } catch {
+               Write-Warning "Could not open Microsoft Store for Windows App Runtime"
+           }
        }
    }
    
-   # Install VCLibs
-   Write-Host "Installing: Microsoft.VCLibs.x64.14.00.Desktop.appx"
-   try {
-       Add-AppxPackage $paths[0] -ErrorAction Stop
-   } catch {
-       Write-Warning "VCLibs installation failed: $_"
-   }
-   
-   # Install UI.Xaml
-   Write-Host "Installing: Microsoft.UI.Xaml.2.8.x64.appx"
-   try {
-       Add-AppxPackage $paths[1] -ErrorAction Stop
-   } catch {
-       Write-Warning "UI.Xaml installation failed: $_"
+   # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
+   for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
+       if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
+           Write-Host "Installing: $($fileNames[$i])"
+           try {
+               Add-AppxPackage $paths[$i] -ErrorAction Stop
+               Write-Host "$($fileNames[$i]) installed successfully"
+           } catch {
+               Write-Warning "$($fileNames[$i]) installation failed: $_"
+           }
+       }
    }
    
    # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
-   Write-Host "Installing: Microsoft.DesktopAppInstaller (WinGet)"
-   try {
-       Add-AppxPackage $paths[2] -ErrorAction Stop
-       Write-Host "WinGet installed successfully"
-   } catch {
-       Write-Warning "WinGet installation failed: $_"
-       Write-Host "Attempting to install via alternative method..."
-       # Try installing via Microsoft Store
-       Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction SilentlyContinue
-       Write-Host "Please install WinGet from the Microsoft Store if automatic installation failed"
+   $wingetInstalledSuccessfully = $false
+   $wingetBundleIndex = $paths.Count - 1
+   if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
+       Write-Host "Installing: Microsoft.DesktopAppInstaller (WinGet)"
+       try {
+           Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
+           Write-Host "WinGet installed successfully"
+           $wingetInstalledSuccessfully = $true
+       } catch {
+           Write-Warning "WinGet installation failed: $_"
+       }
    }
    
-   # Wait a moment for installation to complete
-   Start-Sleep -Seconds 3
+   # If WinGet installation failed, try Microsoft Store method (recommended by Microsoft)
+   # According to Microsoft docs, WinGet is distributed via Microsoft Store for security
+   if (-not $wingetInstalledSuccessfully) {
+       Write-Host "Attempting to install WinGet via Microsoft Store (recommended method)..."
+       Write-Host "WinGet is distributed via Microsoft Store for secure installation with certificate pinning."
+       try {
+           # Use the official Microsoft Store link for App Installer (which includes WinGet)
+           Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction Stop
+           Write-Host "Opened Microsoft Store for App Installer (WinGet)."
+           Write-Host "Please click 'Get' or 'Install' in the Microsoft Store window that opened."
+           Write-Host "Waiting for installation to complete..."
+           # Wait longer for Store installation - user may need to interact
+           Start-Sleep -Seconds 15
+           
+           # Check if App Installer was installed
+           $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
+           if ($appInstallerCheck) {
+               Write-Host "App Installer (WinGet) detected after Store installation"
+               $wingetInstalledSuccessfully = $true
+           }
+       } catch {
+           Write-Warning "Could not open Microsoft Store for WinGet: $_"
+           Write-Host "You can manually install WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
+       }
+   }
    
+   Write-Host "Verifying WinGet installation..."
    # Refresh environment to pick up winget
    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
    
-   Write-Host "Verifying Version number of WinGet"
+   # Wait a bit more for installation to complete
+   Start-Sleep -Seconds 3
+   
+   # Verify using --info (recommended by Microsoft documentation)
+   # Reference: https://learn.microsoft.com/en-us/windows/package-manager/
    try {
-       $wingetCheck = winget -v 2>$null
-       if ($wingetCheck) {
-           Write-Host "WinGet version: $wingetCheck"
+       $wingetInfo = winget --info 2>$null
+       if ($wingetInfo) {
+           $wingetVersion = winget -v 2>$null
+           if ($wingetVersion) {
+               Write-Host "WinGet installed successfully. Version: $wingetVersion"
+           } else {
+               Write-Host "WinGet is available (verified with --info)"
+           }
        } else {
            Write-Warning "WinGet may not be available yet. You may need to restart PowerShell or wait a moment."
+           Write-Host "If WinGet is still not available, please install it manually from the Microsoft Store:"
+           Write-Host "https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
        }
    } catch {
-       Write-Warning "WinGet verification failed. You may need to restart PowerShell."
+       Write-Warning "WinGet verification failed. You may need to restart PowerShell or install WinGet from Microsoft Store."
+       Write-Host "Microsoft Store link: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
    }
    
    Write-Host "Cleaning up"
@@ -116,7 +312,7 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    }
    foreach($filePath in $allFiles)
    {
-      if (Test-Path $filePath) 
+      if ($null -ne $filePath -and (Test-Path $filePath)) 
       {
          Write-Host "Deleting: ($filePath)"
          Remove-Item $filePath -Recurse -Force -ErrorAction SilentlyContinue
@@ -145,7 +341,8 @@ if (!$isAdmin) {
    Start-Process shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App
 
    Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin 
-   winget configuration -f $dscNonAdmin 
+   # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
+   winget configuration -f $dscNonAdmin --accept-package-agreements --accept-source-agreements 
    
    # clean up, Clean up, everyone wants to clean up
    Remove-Item $dscNonAdmin -verbose
@@ -240,6 +437,22 @@ else {
             Write-Warning "Could not find or install NFS Client feature. NFS drive mapping may fail."
         }
         
+        # Install Windows Sandbox feature
+        Write-Host "Checking for Windows Sandbox feature..."
+        $sandboxFeatureName = "Containers-DisposableClientVM"
+        $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
+        if ($sandboxFeature) {
+            if ($sandboxFeature.State -ne "Enabled") {
+                Write-Host "Installing Windows Sandbox feature - this may take a few minutes..."
+                Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart | Out-Null
+                Write-Host "Windows Sandbox feature installed"
+            } else {
+                Write-Host "Windows Sandbox feature already installed"
+            }
+        } else {
+            Write-Warning "Could not find Windows Sandbox feature. It may not be available on this Windows edition."
+        }
+        
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
         $nPath = "NFS:/media"
@@ -271,6 +484,165 @@ else {
         Write-Warning "Failed to map network drives: $_"
     }
     Write-Host "Done: Mapping network drives"
+    # ---------------
+    # Installing Windows Subsystem for Linux (WSL)
+    # Reference: https://learn.microsoft.com/en-us/windows/wsl/
+    Write-Host "Start: Installing Windows Subsystem for Linux (WSL)"
+    try {
+        # Check if WSL is already installed
+        $wslInstalled = $false
+        try {
+            $wslStatus = wsl --status 2>$null
+            if ($wslStatus) {
+                $wslInstalled = $true
+                Write-Host "WSL is already installed"
+                # Check if WSL 2 is set as default
+                $wslVersion = wsl --status 2>$null | Select-String "Default Version"
+                if ($wslVersion -notmatch "2") {
+                    Write-Host "Setting WSL 2 as default version..."
+                    wsl --set-default-version 2 2>$null
+                    Write-Host "WSL 2 set as default version"
+                } else {
+                    Write-Host "WSL 2 is already the default version"
+                }
+            }
+        } catch {
+            # WSL not installed or not available
+        }
+        
+        if (-not $wslInstalled) {
+            Write-Host "Installing WSL using the recommended method (wsl --install)..."
+            Write-Host "This will install WSL with the default Linux distribution (Ubuntu)"
+            Write-Host "Reference: https://learn.microsoft.com/en-us/windows/wsl/install"
+            
+            # Use the modern wsl --install command (recommended by Microsoft)
+            # This automatically enables required features and installs WSL 2
+            try {
+                $wslInstallOutput = wsl --install 2>&1
+                
+                # Check if installation was successful or if it requires a reboot
+                if ($LASTEXITCODE -eq 0 -or $wslInstallOutput -match "restart" -or $wslInstallOutput -match "reboot") {
+                    Write-Host "WSL installation initiated successfully"
+                    Write-Host "Note: A system restart may be required to complete WSL installation"
+                } else {
+                    # If wsl --install fails, try manual installation
+                    Write-Host "wsl --install did not complete automatically, trying manual installation..."
+                    
+                    # Enable WSL feature
+                    Write-Host "Enabling Windows Subsystem for Linux feature..."
+                    $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction SilentlyContinue
+                    if ($wslFeature) {
+                        if ($wslFeature.State -ne "Enabled") {
+                            Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -All -NoRestart | Out-Null
+                            Write-Host "Windows Subsystem for Linux feature enabled"
+                        } else {
+                            Write-Host "Windows Subsystem for Linux feature already enabled"
+                        }
+                    }
+                    
+                    # Enable Virtual Machine Platform feature (required for WSL 2)
+                    Write-Host "Enabling Virtual Machine Platform feature (required for WSL 2)..."
+                    $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
+                    if ($vmPlatformFeature) {
+                        if ($vmPlatformFeature.State -ne "Enabled") {
+                            Enable-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -All -NoRestart | Out-Null
+                            Write-Host "Virtual Machine Platform feature enabled"
+                        } else {
+                            Write-Host "Virtual Machine Platform feature already enabled"
+                        }
+                    }
+                    
+                    # Set WSL 2 as default version
+                    Write-Host "Setting WSL 2 as default version..."
+                    wsl --set-default-version 2 2>$null
+                    
+                    # Install Ubuntu (default distribution)
+                    Write-Host "Installing Ubuntu Linux distribution..."
+                    wsl --install -d Ubuntu 2>$null
+                    
+                    Write-Host "WSL installation completed. A system restart may be required."
+                }
+            } catch {
+                Write-Warning "WSL installation encountered an error: $_"
+                Write-Host "You may need to install WSL manually. See: https://learn.microsoft.com/en-us/windows/wsl/install"
+            }
+        }
+        
+        # List installed distributions
+        Write-Host "Checking installed WSL distributions..."
+        try {
+            $wslList = wsl --list --verbose 2>$null
+            if ($wslList) {
+                Write-Host "Installed WSL distributions:"
+                $wslList | ForEach-Object { Write-Host "  $_" }
+            }
+        } catch {
+            Write-Host "No WSL distributions found or WSL not yet available"
+        }
+        
+    } catch {
+        Write-Warning "Failed to install WSL: $_"
+        Write-Host "You can install WSL manually using: wsl --install"
+        Write-Host "Documentation: https://learn.microsoft.com/en-us/windows/wsl/install"
+    }
+    Write-Host "Done: Installing Windows Subsystem for Linux (WSL)"
+    # ---------------
+    # Installing Windows Terminal
+    # Reference: https://learn.microsoft.com/en-us/windows/terminal/
+    Write-Host "Start: Installing Windows Terminal"
+    try {
+        # Check if Windows Terminal is already installed
+        $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+        if ($wtInstalled) {
+            Write-Host "Windows Terminal is already installed (Version: $($wtInstalled.Version))"
+        } else {
+            Write-Host "Installing Windows Terminal using WinGet..."
+            Write-Host "Reference: https://learn.microsoft.com/en-us/windows/terminal/install"
+            
+            # Install Windows Terminal using winget (recommended by Microsoft)
+            # Use -e for exact match and --accept-package-agreements for automation
+            try {
+                winget install --id Microsoft.WindowsTerminal -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+                
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "Windows Terminal installed successfully"
+                } else {
+                    Write-Warning "WinGet installation may have failed. Trying alternative method..."
+                    # Fallback: Try installing via Microsoft Store
+                    try {
+                        Start-Process "ms-windows-store://pdp/?ProductId=9N0DX20HK701" -ErrorAction Stop
+                        Write-Host "Opened Microsoft Store for Windows Terminal. Please install it if prompted."
+                        Start-Sleep -Seconds 5
+                        
+                        # Check if it got installed
+                        $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+                        if ($wtCheck) {
+                            Write-Host "Windows Terminal installed via Microsoft Store"
+                        }
+                    } catch {
+                        Write-Warning "Could not open Microsoft Store for Windows Terminal: $_"
+                    }
+                }
+            } catch {
+                Write-Warning "Failed to install Windows Terminal via WinGet: $_"
+                Write-Host "You can install Windows Terminal manually from: https://www.microsoft.com/store/productId/9N0DX20HK701"
+            }
+        }
+        
+        # Verify installation
+        $wtFinalCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+        if ($wtFinalCheck) {
+            Write-Host "Windows Terminal is available and ready to use"
+        } else {
+            Write-Warning "Windows Terminal installation could not be verified"
+        }
+        
+    } catch {
+        Write-Warning "Failed to install Windows Terminal: $_"
+        Write-Host "You can install Windows Terminal manually using: winget install --id Microsoft.WindowsTerminal -e"
+        Write-Host "Or from Microsoft Store: https://www.microsoft.com/store/productId/9N0DX20HK701"
+    }
+    Write-Host "Done: Installing Windows Terminal"
     # ---------------
     # Activating Windows with HWID
     Write-Host "Start: Windows HWID Activation"
@@ -312,7 +684,8 @@ else {
     gpupdate /force
 
     Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice 
-    winget configuration -f $dscOffice 
+    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
+    winget configuration -f $dscOffice --accept-package-agreements --accept-source-agreements 
     Remove-Item $dscOffice -verbose
     Start-Process outlook.exe
     Start-Process ms-teams.exe
@@ -409,10 +782,12 @@ else {
         Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin
     }
     
-    winget configuration -f $dscAdmin 
+    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
+    winget configuration -f $dscAdmin --accept-package-agreements --accept-source-agreements
 
     Write-Host "Start: PowerToys dsc install"
-    winget configuration -f $dscPowerToysEnterprise # no cleanup needed as this is intentionally local
+    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
+    winget configuration -f $dscPowerToysEnterprise --accept-package-agreements --accept-source-agreements # no cleanup needed as this is intentionally local
    
     # clean up, Clean up, everyone wants to clean up
     Remove-Item $dscAdmin -verbose
