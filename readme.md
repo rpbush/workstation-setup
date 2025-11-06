@@ -15,12 +15,12 @@ Most everything in the dsc.yml should work.
 Run this command in PowerShell (as Administrator) to download and execute the setup script directly:
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null; Set-Location "C:\temp"; $scriptPath = "C:\temp\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
 ```
 
 **One-liner (copy and paste):**
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null; Set-Location "C:\temp"; $scriptPath = "C:\temp\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
 ```
 
 ### Prerequisites
@@ -43,12 +43,16 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath =
 If you prefer to download the script first:
 
 ```powershell
+# Create temp directory and change to it
+New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null
+Set-Location "C:\temp"
+
 # Download the script
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile "$env:TEMP\boot.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile "C:\temp\boot.ps1"
 
 # Run the script
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-& "$env:TEMP\boot.ps1"
+& "C:\temp\boot.ps1"
 ```
 
 ## Publishing to GitHub
