@@ -33,9 +33,10 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath =
 ### Important Notes
 
 - The script will automatically download required DSC configuration files from GitHub (currently configured to download from `https://github.com/rpbush/New_Computer_Setup/blob/main/`)
-- **Windows Activation**: The script references `MAS_AIO.cmd` for Windows HWID activation. If this file is not present in the repository, Windows activation will be skipped with a warning. You can download MAS_AIO separately if needed.
+- **Windows Activation**: The script will automatically download `MAS_AIO.cmd` from the GitHub repository if it's not found locally. Windows activation will be skipped with a warning if the download fails.
 - The script will prompt for administrator privileges when needed
 - **Network Drives**: The script maps N: (NFS:/media) and S: (\\FS-1\Storage). Modify these in `boot.ps1` if your network setup differs.
+- **All Required Files**: The script automatically downloads all required files from GitHub, so you only need to run the one-liner command above.
 
 ### Alternative: Download and Run Locally
 
@@ -64,11 +65,10 @@ To publish this project to GitHub:
    ```
 3. Add your GitHub repository as remote:
    ```powershell
-   git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+   git remote add origin https://github.com/rpbush/workstation-setup.git
    git branch -M main
    git push -u origin main
    ```
-4. Update the README.md with your actual GitHub username and repository name in the Quick Start section
 
 ### Repository Structure
 

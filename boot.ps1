@@ -199,11 +199,25 @@ else {
     Write-Host "Start: Windows HWID Activation"
     $scriptDir = Split-Path $mypath -Parent
     $masAioPath = Join-Path $scriptDir "MAS_AIO.cmd"
+    
+    # If MAS_AIO.cmd not found locally, try downloading from GitHub
+    if (-not (Test-Path $masAioPath)) {
+        Write-Host "MAS_AIO.cmd not found locally, attempting to download from GitHub..."
+        try {
+            $masAioUrl = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/MAS_AIO.cmd"
+            Invoke-WebRequest -Uri $masAioUrl -OutFile $masAioPath -ErrorAction Stop
+            Write-Host "Successfully downloaded MAS_AIO.cmd from GitHub"
+        } catch {
+            Write-Warning "Failed to download MAS_AIO.cmd from GitHub: $_"
+            Write-Warning "Windows activation will be skipped. You can download MAS_AIO.cmd manually if needed."
+        }
+    }
+    
     if (Test-Path $masAioPath) {
         & cmd.exe /c "`"$masAioPath`" /HWID"
         Write-Host "Done: Windows HWID Activation"
     } else {
-        Write-Warning "MAS_AIO.cmd not found at $masAioPath"
+        Write-Warning "MAS_AIO.cmd not available. Windows activation skipped."
     }
     # ---------------
     # Installing office workload
