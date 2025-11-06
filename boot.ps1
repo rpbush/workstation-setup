@@ -2,13 +2,25 @@ $mypath = $MyInvocation.MyCommand.Path
 Write-Output "Path of the script: $mypath"
 Write-Output "Args for script: $Args"
 
-# forcing WinGet to be installed
-$isWinGetRecent = (winget -v).Trim('v').TrimEnd("-preview").split('.')
-
 # turning off progress bar to make invoke WebRequest fast
 $ProgressPreference = 'SilentlyContinue'
 
-if(!(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
+# Check if WinGet is installed and get version
+$wingetInstalled = $false
+$isWinGetRecent = $null
+
+try {
+    $wingetVersion = winget -v 2>$null
+    if ($wingetVersion) {
+        $wingetInstalled = $true
+        $isWinGetRecent = $wingetVersion.Trim('v').TrimEnd("-preview").split('.')
+    }
+} catch {
+    $wingetInstalled = $false
+}
+
+# forcing WinGet to be installed if not present or version is too old
+if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
 {
    $paths = "Microsoft.VCLibs.x64.14.00.Desktop.appx", "Microsoft.UI.Xaml.2.8.x64.appx", "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
    $uris = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx", "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx", "https://aka.ms/getwinget"
