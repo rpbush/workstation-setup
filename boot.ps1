@@ -264,7 +264,74 @@ else {
 
     # Staring dev workload
     Write-Host "Start: Dev flows install"
-    Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin 
+    
+    # Check if a second physical drive already exists (skip dev drive creation if it does)
+    $physicalDrives = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' } | Sort-Object DeviceID
+    $secondDriveExists = $physicalDrives.Count -gt 1
+    
+    if ($secondDriveExists) {
+        Write-Host "Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation from C: drive."
+        Write-Host "Downloading DSC configuration..."
+        Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin
+        
+        # Remove Dev Drive resource from DSC file if it exists
+        $dscLines = Get-Content $dscAdmin
+        $newDscContent = @()
+        $skipDevDrive = $false
+        $devDriveIndent = 0
+        
+        for ($i = 0; $i -lt $dscLines.Count; $i++) {
+            $line = $dscLines[$i]
+            
+            # Detect start of Dev Drive resource (look for "id: DevDrive1")
+            if ($line -match '^\s+id:\s+DevDrive1') {
+                $skipDevDrive = $true
+                if ($line -match '^(\s+)') {
+                    $devDriveIndent = $matches[1].Length
+                } else {
+                    $devDriveIndent = 0
+                }
+                # Skip this line and find the start of the resource block (go back to find "resource: Disk")
+                for ($j = $i - 1; $j -ge 0; $j--) {
+                    if ($dscLines[$j] -match '^\s+-\s+resource:\s+Disk') {
+                        # Remove from the resource start
+                        $i = $j - 1
+                        break
+                    }
+                }
+                continue
+            }
+            
+            # If we're skipping, check if we've reached the end of this resource block
+            if ($skipDevDrive) {
+                $currentIndent = if ($line -match '^(\s*)') { $matches[1].Length } else { 0 }
+                # Check if we've reached a new resource or back to the same indent level as resources list
+                if ($line.Trim() -eq '' -or ($currentIndent -le $devDriveIndent -and ($line -match '^\s+-\s+resource:' -or $line -match '^\s+[a-zA-Z]'))) {
+                    $skipDevDrive = $false
+                    # Add the line if it's not empty or it's a new resource
+                    if ($line.Trim() -ne '') {
+                        $newDscContent += $line
+                    }
+                }
+                continue
+            }
+            
+            # Add line if we're not skipping
+            $newDscContent += $line
+        }
+        
+        if ($newDscContent.Count -lt $dscLines.Count) {
+            Write-Host "Removing Dev Drive resource from DSC configuration..."
+            Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n")
+            Write-Host "Dev Drive resource removed from configuration"
+        } else {
+            Write-Host "Dev Drive resource not found in DSC file (may have already been removed)"
+        }
+    } else {
+        Write-Host "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive."
+        Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin
+    }
+    
     winget configuration -f $dscAdmin 
 
     Write-Host "Start: PowerToys dsc install"
