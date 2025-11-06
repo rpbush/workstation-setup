@@ -22,39 +22,104 @@ try {
 # forcing WinGet to be installed if not present or version is too old
 if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
 {
+   Write-Host "Downloading WinGet and its dependencies..."
+   
+   # Download Windows App Runtime first (required dependency for newer WinGet versions)
+   $appRuntimePath = "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.msix"
+   Write-Host "Downloading: Windows App Runtime 1.8 (required dependency)"
+   try {
+       # Try direct download from Microsoft
+       $appRuntimeUri = "https://aka.ms/windowsappruntime/1.8/x64"
+       Invoke-WebRequest -Uri $appRuntimeUri -OutFile $appRuntimePath -ErrorAction Stop
+       Write-Host "Windows App Runtime downloaded successfully"
+   } catch {
+       Write-Warning "Failed to download Windows App Runtime from primary source: $_"
+       Write-Host "Attempting to download from Microsoft Store or skipping..."
+       # If download fails, we'll try to install WinGet anyway - it may work on some systems
+       $appRuntimePath = $null
+   }
+   
+   # Download other dependencies
    $paths = "Microsoft.VCLibs.x64.14.00.Desktop.appx", "Microsoft.UI.Xaml.2.8.x64.appx", "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
    $uris = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx", "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx", "https://aka.ms/getwinget"
-   Write-Host "Downloading WinGet and its dependencies..."
-
+   
    for ($i = 0; $i -lt $uris.Length; $i++) {
        $filePath = $paths[$i]
        $fileUri = $uris[$i]
        Write-Host "Downloading: ($filePath) from $fileUri"
        Invoke-WebRequest -Uri $fileUri -OutFile $filePath
    }
-
+   
    Write-Host "Installing WinGet and its dependencies..."
    
-   foreach($filePath in $paths)
-   {
-       Write-Host "Installing: ($filePath)"
-       Add-AppxPackage $filePath
+   # Install Windows App Runtime first if downloaded
+   if (Test-Path $appRuntimePath) {
+       Write-Host "Installing: Windows App Runtime"
+       try {
+           Add-AppxPackage $appRuntimePath -ErrorAction Stop
+       } catch {
+           Write-Warning "Windows App Runtime installation failed: $_"
+       }
    }
-
+   
+   # Install VCLibs
+   Write-Host "Installing: Microsoft.VCLibs.x64.14.00.Desktop.appx"
+   try {
+       Add-AppxPackage $paths[0] -ErrorAction Stop
+   } catch {
+       Write-Warning "VCLibs installation failed: $_"
+   }
+   
+   # Install UI.Xaml
+   Write-Host "Installing: Microsoft.UI.Xaml.2.8.x64.appx"
+   try {
+       Add-AppxPackage $paths[1] -ErrorAction Stop
+   } catch {
+       Write-Warning "UI.Xaml installation failed: $_"
+   }
+   
+   # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
+   Write-Host "Installing: Microsoft.DesktopAppInstaller (WinGet)"
+   try {
+       Add-AppxPackage $paths[2] -ErrorAction Stop
+       Write-Host "WinGet installed successfully"
+   } catch {
+       Write-Warning "WinGet installation failed: $_"
+       Write-Host "Attempting to install via alternative method..."
+       # Try installing via Microsoft Store
+       Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction SilentlyContinue
+       Write-Host "Please install WinGet from the Microsoft Store if automatic installation failed"
+   }
+   
+   # Wait a moment for installation to complete
+   Start-Sleep -Seconds 3
+   
+   # Refresh environment to pick up winget
+   $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+   
    Write-Host "Verifying Version number of WinGet"
-   winget -v
-
+   try {
+       $wingetCheck = winget -v 2>$null
+       if ($wingetCheck) {
+           Write-Host "WinGet version: $wingetCheck"
+       } else {
+           Write-Warning "WinGet may not be available yet. You may need to restart PowerShell or wait a moment."
+       }
+   } catch {
+       Write-Warning "WinGet verification failed. You may need to restart PowerShell."
+   }
+   
    Write-Host "Cleaning up"
-   foreach($filePath in $paths)
+   $allFiles = @($paths) + @($appRuntimePath)
+   if (Test-Path ".\AppRuntime") {
+       $allFiles += ".\AppRuntime"
+   }
+   foreach($filePath in $allFiles)
    {
       if (Test-Path $filePath) 
       {
          Write-Host "Deleting: ($filePath)"
-         Remove-Item $filePath -verbose
-      } 
-      else
-      {
-         Write-Error "Path doesn't exits: ($filePath)"
+         Remove-Item $filePath -Recurse -Force -ErrorAction SilentlyContinue
       }
    }
 }
