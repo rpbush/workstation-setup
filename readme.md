@@ -15,14 +15,12 @@ Most everything in the dsc.yml should work.
 Run this command in PowerShell (as Administrator) to download and execute the setup script directly:
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
 ```
-
-**Note:** Replace `YOUR_USERNAME` and `YOUR_REPO_NAME` with your actual GitHub username and repository name.
 
 **One-liner (copy and paste):**
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
 ```
 
 ### Prerequisites
@@ -45,7 +43,7 @@ If you prefer to download the script first:
 
 ```powershell
 # Download the script
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/boot.ps1" -OutFile "$env:TEMP\boot.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile "$env:TEMP\boot.ps1"
 
 # Run the script
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
