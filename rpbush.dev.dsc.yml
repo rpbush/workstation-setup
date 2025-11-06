@@ -1,0 +1,248 @@
+# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
+# Reference: https://github.com/microsoft/PowerToys/blob/main/doc/devdocs/readme.md#compiling-powertoys
+properties:
+  configurationVersion: 0.2.0
+  resources:
+    # Creates a new Dev Drive volume with Drive letter 'Z' and label 'Dev Drive 1' onto disk 0
+    - resource: Disk
+      id: DevDrive1
+      directives:
+        module: StorageDsc
+        description: 'Format a new Dev Drive volume onto Disk 0'
+        allowPrerelease: true
+      settings:
+        DiskId: '0'
+        DiskIdType: 'Number'
+        DriveLetter: 'Z'
+        FSLabel: 'Dev Drive'
+        DevDrive: true
+        AllowDestructive: true
+        FSFormat: 'ReFS'
+        Size: '75Gb'
+
+    # Windows settings
+    - resource: Microsoft.Windows.Developer/WindowsExplorer
+      directives:
+        description: File Explorer settings
+        allowPrerelease: true
+      settings:
+        FileExtensions: Show
+        HiddenFiles: Show
+
+    - resource: Microsoft.Windows.Developer/Taskbar
+      directives:
+        description: Taskbar settings
+        allowPrerelease: true
+      settings:
+        SearchboxMode: Hide
+        TaskViewButton: Hide
+        WidgetsButton: Hide
+
+    # Install Git
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: git.git
+      directives:
+        description: Install Git
+        allowPrerelease: true
+      settings:
+        id: git.git
+        source: winget
+
+    # Clone the PowerToys repository
+    - resource: GitDsc/GitClone
+      directives:
+        description: Clone the PowerToys repository
+        allowPrerelease: true
+      settings:
+        HttpsUrl: https://github.com/microsoft/powertoys.git
+        RootDirectory: 'Z:/Source/'
+
+    # Install PowerShell 7
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Microsoft.PowerShell
+      directives:
+        description: Install PowerShell 7
+        allowPrerelease: true
+      settings:
+        id: Microsoft.PowerShell
+        source: winget
+
+    # Install PowerToys
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Microsoft.PowerToys
+      directives:
+        description: Install PowerToys
+        allowPrerelease: true
+      settings:
+        id: Microsoft.PowerToys
+        source: winget
+
+    # Install Signal
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: OpenWhisperSystems.Signal
+      directives:
+        description: Install Signal
+        allowPrerelease: true
+      settings:
+        id: OpenWhisperSystems.Signal
+        source: winget
+
+    # Install Steam
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Valve.Steam
+      directives:
+        description: Install Steam
+        allowPrerelease: true
+      settings:
+        id: Valve.Steam
+        source: winget
+
+    # Install Remote Desktop
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: 9WZDNCRFJ3PS
+      directives:
+        description: Install Remote Desktop
+        allowPrerelease: true
+      settings:
+        id: 9WZDNCRFJ3PS
+        source: msstore
+
+    # Install 7zip
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: 7zip.7zip
+      directives:
+        description: Install 7zip
+        allowPrerelease: true
+      settings:
+        id: 7zip.7zip
+        source: winget
+
+    # Install Notepad++
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Notepad++.Notepad++
+      directives:
+        description: Install Notepad++
+        allowPrerelease: true
+      settings:
+        id: Notepad++.Notepad++
+        source: winget
+
+    # Install GitHub CLI
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: GitHub.cli
+      directives:
+        description: Install GitHub CLI
+        allowPrerelease: true
+      settings:
+        id: GitHub.cli
+        source: winget
+
+    # Install Cursor
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Anysphere.Cursor
+      directives:
+        description: Install Cursor
+        allowPrerelease: true
+      settings:
+        id: Anysphere.Cursor
+        source: winget
+
+    # Install Windows Terminal
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Microsoft.WindowsTerminal
+      directives:
+        description: Install Windows Terminal
+        allowPrerelease: true
+      settings:
+        id: Microsoft.WindowsTerminal
+        source: winget
+
+    # Install balenaEtcher
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Balena.Etcher
+      directives:
+        description: Install balenaEtcher
+        allowPrerelease: true
+      settings:
+        id: Balena.Etcher
+        source: winget
+
+    # Install HandBrake
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: HandBrake.HandBrake
+      directives:
+        description: Install HandBrake
+        allowPrerelease: true
+      settings:
+        id: HandBrake.HandBrake
+        source: winget
+
+    # Install Corsair iCUE5
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Corsair.iCUE.5
+      directives:
+        description: Install Corsair iCUE5
+        allowPrerelease: true
+      settings:
+        id: Corsair.iCUE.5
+        source: winget
+
+    # Install Adobe Acrobat Reader
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Adobe.Acrobat.Reader.64-bit
+      directives:
+        description: Install Adobe Acrobat Reader
+        allowPrerelease: true
+      settings:
+        id: Adobe.Acrobat.Reader.64-bit
+        source: winget
+
+    # Install Adobe Creative Cloud
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Adobe.CreativeCloud
+      directives:
+        description: Install Adobe Creative Cloud
+        allowPrerelease: true
+      settings:
+        id: Adobe.CreativeCloud
+        source: winget
+
+    # Install Sound Blaster Command
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: CreativeTechnology.SoundBlasterCommand
+      directives:
+        description: Install Sound Blaster Command
+        allowPrerelease: true
+      settings:
+        id: CreativeTechnology.SoundBlasterCommand
+        source: winget
+
+    # Install PrivadoVPN
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: PrivadoNetworksAG.PrivadoVPN
+      directives:
+        description: Install PrivadoVPN
+        allowPrerelease: true
+      settings:
+        id: PrivadoNetworksAG.PrivadoVPN
+        source: winget
+
+    # Install Garmin Express
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Garmin.Express
+      directives:
+        description: Install Garmin Express
+        allowPrerelease: true
+      settings:
+        id: Garmin.Express
+        source: winget
+
+    # Install Ubiquiti Identity Desktop
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: UbiquitiInc.IdentityDesktop
+      directives:
+        description: Install Ubiquiti Identity Desktop
+        allowPrerelease: true
+      settings:
+        id: UbiquitiInc.IdentityDesktop
+        source: winget
