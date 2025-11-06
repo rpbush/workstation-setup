@@ -28,8 +28,8 @@ git add .
 # Create initial commit
 git commit -m "Initial commit: Workstation setup script"
 
-# Add your GitHub repository as remote (replace YOUR_USERNAME and YOUR_REPO_NAME)
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+# Add your GitHub repository as remote
+git remote add origin https://github.com/rpbush/workstation-setup.git
 
 # Rename branch to main
 git branch -M main
@@ -55,7 +55,7 @@ https://raw.githubusercontent.com/johndoe/workstation-setup/main/boot.ps1
 Test that the script can be downloaded and run:
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; $scriptPath = "$env:TEMP\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
 ```
 
 ## Optional: Add MAS_AIO.cmd
@@ -89,7 +89,7 @@ The repository should contain:
 ### Authentication Issues
 If you encounter authentication issues when pushing:
 - Use a Personal Access Token instead of password
-- Or use SSH: `git remote set-url origin git@github.com:YOUR_USERNAME/YOUR_REPO_NAME.git`
+- Or use SSH: `git remote set-url origin git@github.com:rpbush/workstation-setup.git`
 
 ### Large File Issues
 If MAS_AIO.cmd is too large:
