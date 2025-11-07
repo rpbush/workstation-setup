@@ -421,32 +421,25 @@ else {
     # The process requires user interaction through the Windows Settings GUI
     Write-Host "Start: Microsoft Account sign-in"
     try {
-        # Prompt user for email address
-        $msaEmail = Read-Host "Enter your Microsoft Account email address (or press Enter to skip)"
+        Write-Host "Opening Windows Settings for Microsoft Account sign-in..."
+        Write-Host ""
+        Write-Host "Note: Windows does not support command-line Microsoft account sign-in." -ForegroundColor Yellow
+        Write-Host "You will need to complete the sign-in process in the Settings window." -ForegroundColor Yellow
+        Write-Host ""
         
-        if ($msaEmail -and $msaEmail.Trim() -ne "") {
-            Write-Host "Opening Windows Settings to sign in with Microsoft Account: $msaEmail"
-            Write-Host ""
-            Write-Host "Note: Windows does not support command-line Microsoft account sign-in." -ForegroundColor Yellow
-            Write-Host "You will need to complete the sign-in process in the Settings window." -ForegroundColor Yellow
-            Write-Host ""
-            
-            # Open Windows Settings to the Accounts page for adding a Microsoft account
-            # This opens the "Add a Microsoft account" page
-            Start-Process "ms-settings:emailandaccounts" -ErrorAction Stop
-            
-            Write-Host "Instructions:" -ForegroundColor Cyan
-            Write-Host "1. In the Settings window, click 'Add a Microsoft account' or 'Add account'"
-            Write-Host "2. Enter your email: $msaEmail"
-            Write-Host "3. Enter your password and follow the authentication prompts"
-            Write-Host "4. Complete any additional verification steps (if required)"
-            Write-Host ""
-            Write-Host "Press any key after you've completed the Microsoft Account sign-in (or to skip)..."
-            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-            Write-Host ""
-        } else {
-            Write-Host "Microsoft Account sign-in skipped."
-        }
+        # Open Windows Settings to the Accounts page for adding a Microsoft account
+        # This opens the "Add a Microsoft account" page
+        Start-Process "ms-settings:emailandaccounts" -ErrorAction Stop
+        
+        Write-Host "Instructions:" -ForegroundColor Cyan
+        Write-Host "1. In the Settings window, click 'Add a Microsoft account' or 'Add account'"
+        Write-Host "2. Enter your Microsoft Account email address"
+        Write-Host "3. Enter your password and follow the authentication prompts"
+        Write-Host "4. Complete any additional verification steps (if required)"
+        Write-Host ""
+        Write-Host "Press any key after you've completed the Microsoft Account sign-in (or to skip)..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        Write-Host ""
     } catch {
         Write-Warning "Failed to open account settings: $_"
         Write-Host "You can manually add your Microsoft Account from Settings > Accounts > Email & accounts"
