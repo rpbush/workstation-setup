@@ -5,12 +5,20 @@ Write-Output "Args for script: $Args"
 # turning off progress bar to make invoke WebRequest fast
 $ProgressPreference = 'SilentlyContinue'
 
+# Suppress all confirmation prompts for the entire script
+$ConfirmPreference = 'None'
+$ErrorActionPreference = 'Continue'
+
 # Bootstrap WinGet using PowerShell module (works in Windows Sandbox and other environments)
 Write-Host "Installing WinGet PowerShell module from PSGallery..."
 try {
-    # Install NuGet package provider if not available
+    # Install NuGet package provider if not available (non-interactive)
     if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-        Install-PackageProvider -Name NuGet -Force -Scope CurrentUser | Out-Null
+        # Force installation without prompting - automatically download and install
+        # Use -ForceBootstrap to automatically download, and pipe to Out-Null to suppress prompts
+        $null = Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ForceBootstrap -SkipPublisherCheck -ErrorAction SilentlyContinue
+        # Wait a moment for installation to complete
+        Start-Sleep -Seconds 2
     }
     
     # Install Microsoft.WinGet.Client module if not available
@@ -115,7 +123,6 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    
    # Check if Windows App Runtime is already installed
    $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
-   $appRuntimePath = $null
    
    if (-not $appRuntimeInstalled) {
        Write-Host "Windows App Runtime not found, attempting to install..."
@@ -126,7 +133,7 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
            $storeTest = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
            if (-not $storeTest) {
                $storeAvailable = $false
-               Write-Host "Microsoft Store not available (e.g., Windows Sandbox). Using direct download method..."
+               Write-Host "Microsoft Store not available (e.g., Windows Sandbox). Will install WinGet first, then use winget to install Windows App Runtime."
            }
        } catch {
            $storeAvailable = $false
@@ -152,60 +159,12 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
            }
        }
        
-       # If Store method didn't work or isn't available, try direct download
+       # If Store method didn't work or isn't available, skip direct download entirely
+       # Direct download of Windows App Runtime is unreliable - we'll install WinGet first, then use winget to install the runtime
        if (-not $appRuntimeInstalled) {
-           Write-Host "Attempting direct download of Windows App Runtime..."
-           $appRuntimePath = "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.msix"
-           
-           # Try multiple download sources
-           $appRuntimeUris = @(
-               # Direct CDN URL (more reliable)
-               "https://aka.ms/windowsappruntime/1.8/x64",
-               # Alternative: Try to get from GitHub releases via API
-               "https://www.nuget.org/api/v2/package/Microsoft.WindowsAppRuntime/1.8"
-           )
-           
-           $appRuntimeDownloaded = $false
-           foreach ($appRuntimeUri in $appRuntimeUris) {
-               try {
-                   Write-Host "Downloading Windows App Runtime from: $appRuntimeUri"
-                   # Remove existing file if present
-                   if (Test-Path $appRuntimePath) {
-                       Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
-                   }
-                   
-                   # Use Invoke-WebRequest with proper headers and follow redirects
-                   # Use -OutFile directly for binary files (MSIX packages)
-                   $headers = @{
-                       "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                   }
-                   
-                   # Download with maximum redirects - use -OutFile for binary content
-                   Invoke-WebRequest -Uri $appRuntimeUri -Headers $headers -MaximumRedirection 10 -OutFile $appRuntimePath -ErrorAction Stop
-                   
-                   # Validate downloaded file
-                   if (Test-FileValid -FilePath $appRuntimePath -MinSizeBytes 50000000) {
-                       Write-Host "Windows App Runtime downloaded successfully ($([math]::Round((Get-Item $appRuntimePath).Length / 1MB, 2)) MB)"
-                       $appRuntimeDownloaded = $true
-                       break
-                   } else {
-                       Write-Warning "Downloaded file appears invalid (size: $((Get-Item $appRuntimePath).Length) bytes), trying next source..."
-                       Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
-                   }
-               } catch {
-                   Write-Warning "Failed to download from $appRuntimeUri : $_"
-                   if (Test-Path $appRuntimePath) {
-                       Remove-Item $appRuntimePath -Force -ErrorAction SilentlyContinue
-                   }
-               }
-           }
-           
-           # If download failed, try installing WinGet without it first, then use winget to install runtime
-           if (-not $appRuntimeDownloaded) {
-               Write-Warning "Could not download Windows App Runtime directly."
-               Write-Host "Will attempt to install WinGet first, then use winget to install Windows App Runtime if needed."
-               Write-Host "This works in environments like Windows Sandbox where Store is unavailable."
-           }
+           Write-Host "Windows App Runtime not installed."
+           Write-Host "Will attempt to install WinGet first, then use winget to install Windows App Runtime."
+           Write-Host "This approach works better in environments like Windows Sandbox where Store is unavailable."
        }
    } else {
        Write-Host "Windows App Runtime already installed"
@@ -270,18 +229,8 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    
    Write-Host "Installing WinGet and its dependencies..."
    
-   # Install Windows App Runtime from downloaded file if available
-   if ($null -ne $appRuntimePath -and (Test-Path $appRuntimePath)) {
-       Write-Host "Installing: Windows App Runtime from downloaded file..."
-       try {
-           Add-AppxPackage $appRuntimePath -ErrorAction Stop
-           Write-Host "Windows App Runtime installed successfully"
-           $appRuntimeInstalled = $true
-       } catch {
-           Write-Warning "Windows App Runtime installation failed: $_"
-           Write-Host "Will continue with WinGet installation - it may work without it on some systems."
-       }
-   }
+   # Note: Windows App Runtime will be installed via winget after WinGet is installed
+   # This approach is more reliable than direct download
    
    # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
    for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
@@ -378,14 +327,17 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    
    # Verify using --info (recommended by Microsoft documentation)
    # Reference: https://learn.microsoft.com/en-us/windows/package-manager/
+   $wingetFinalCheck = $false
    try {
        $wingetInfo = winget --info 2>$null
        if ($wingetInfo) {
            $wingetVersion = winget -v 2>$null
            if ($wingetVersion) {
                Write-Host "WinGet installed successfully. Version: $wingetVersion"
+               $wingetFinalCheck = $true
            } else {
                Write-Host "WinGet is available (verified with --info)"
+               $wingetFinalCheck = $true
            }
        } else {
            Write-Warning "WinGet may not be available yet. You may need to restart PowerShell or wait a moment."
@@ -395,6 +347,32 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    } catch {
        Write-Warning "WinGet verification failed. You may need to restart PowerShell or install WinGet from Microsoft Store."
        Write-Host "Microsoft Store link: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
+   }
+   
+   # Final verification - if WinGet is still not available, stop the script
+   if (-not $wingetFinalCheck) {
+       # Wait a bit more and do one final check
+       Start-Sleep -Seconds 5
+       $finalWingetCheck = Test-WinGetInstalled
+       if (-not $finalWingetCheck.Installed) {
+           Write-Host ""
+           Write-Host "================================================" -ForegroundColor Red
+           Write-Host "ERROR: WinGet could not be installed or verified." -ForegroundColor Red
+           Write-Host "================================================" -ForegroundColor Red
+           Write-Host ""
+           Write-Host "The script cannot continue without WinGet, as it is required for installing applications."
+           Write-Host ""
+           Write-Host "Please try one of the following:"
+           Write-Host "1. Install WinGet manually from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
+           Write-Host "2. Download WinGet from: https://github.com/microsoft/winget-cli/releases"
+           Write-Host "3. Restart PowerShell and run this script again"
+           Write-Host "4. Ensure Windows App Runtime is installed first, then retry"
+           Write-Host ""
+           Write-Host "Exiting script..." -ForegroundColor Yellow
+           exit 1
+       } else {
+           Write-Host "WinGet verified successfully after additional wait time"
+       }
    }
    
    Write-Host "Cleaning up"
