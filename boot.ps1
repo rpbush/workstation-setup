@@ -870,34 +870,38 @@ else {
 
     gpupdate /force
 
+    $officeDscDownloaded = $false
     try {
         Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+        $officeDscDownloaded = $true
     } catch {
         Write-Warning "Failed to download Office DSC configuration: $_"
         Write-Host "Skipping Office installation due to download failure"
-        return
+        Write-Host "The script will continue with remaining installations..."
     }
     
-    # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
-    winget configuration -f $dscOffice --accept-configuration-agreements 
-    
-    if (Test-Path $dscOffice) {
-        Remove-Item $dscOffice -verbose
-    }
-    
-    # Start Outlook and Teams if they exist
-    $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
-    if ($outlookPath) {
-        Start-Process outlook.exe -ErrorAction SilentlyContinue
-    } else {
-        Write-Warning "Outlook.exe not found. Office may not be installed yet."
-    }
-    
-    $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
-    if ($teamsPath) {
-        Start-Process ms-teams.exe -ErrorAction SilentlyContinue
-    } else {
-        Write-Warning "ms-teams.exe not found. Teams may not be installed yet."
+    if ($officeDscDownloaded) {
+        # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+        winget configuration -f $dscOffice --accept-configuration-agreements 
+        
+        if (Test-Path $dscOffice) {
+            Remove-Item $dscOffice -verbose
+        }
+        
+        # Start Outlook and Teams if they exist
+        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+        if ($outlookPath) {
+            Start-Process outlook.exe -ErrorAction SilentlyContinue
+        } else {
+            Write-Warning "Outlook.exe not found. Office may not be installed yet."
+        }
+        
+        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+        if ($teamsPath) {
+            Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+        } else {
+            Write-Warning "ms-teams.exe not found. Teams may not be installed yet."
+        }
     }
     Write-Host "Done: Office install"
     # Ending office workload
