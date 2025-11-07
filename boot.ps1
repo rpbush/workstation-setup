@@ -627,20 +627,64 @@ else {
     # ---------------
     # Setting power profile to Performance/Ultimate Performance
     Write-Host "Start: Setting power profile to Performance"
-    # Try Ultimate Performance first (highest), then High Performance
-    $ultimatePerfGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-    $highPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
-    
-    # Check if Ultimate Performance exists
-    $powerSchemes = powercfg /list
-    if ($powerSchemes -match $ultimatePerfGuid) {
-        powercfg /setactive $ultimatePerfGuid
-        Write-Host "Power profile set to Ultimate Performance"
-    } elseif ($powerSchemes -match $highPerfGuid) {
-        powercfg /setactive $highPerfGuid
-        Write-Host "Power profile set to High Performance"
-    } else {
-        Write-Warning "Performance power profile not found"
+    try {
+        # Get all power schemes
+        $powerSchemes = powercfg /list 2>$null
+        
+        # Function to find power scheme GUID by name
+        function Get-PowerSchemeGuid {
+            param([string]$SchemeName)
+            
+            # Parse powercfg /list output to find scheme by name
+            # Format: "Power Scheme GUID: Name (GUID)"
+            $lines = $powerSchemes -split "`n"
+            foreach ($line in $lines) {
+                if ($line -match "($([regex]::Escape($SchemeName)))" -and $line -match "([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})") {
+                    return $matches[2]  # Return the GUID
+                }
+            }
+            return $null
+        }
+        
+        # Try to find Ultimate Performance first (highest performance)
+        $ultimatePerfGuid = Get-PowerSchemeGuid "Ultimate Performance"
+        if ($ultimatePerfGuid) {
+            powercfg /setactive $ultimatePerfGuid 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Power profile set to Ultimate Performance"
+            } else {
+                Write-Warning "Failed to set Ultimate Performance profile"
+            }
+        } else {
+            # Fall back to High Performance
+            $highPerfGuid = Get-PowerSchemeGuid "High Performance"
+            if ($highPerfGuid) {
+                powercfg /setactive $highPerfGuid 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "Power profile set to High Performance"
+                } else {
+                    Write-Warning "Failed to set High Performance profile"
+                }
+            } else {
+                # Last resort: try standard GUIDs (these are consistent across Windows)
+                Write-Host "Could not find performance profile by name, trying standard GUIDs..."
+                $standardUltimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+                $standardHighGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+                
+                if ($powerSchemes -match $standardUltimateGuid) {
+                    powercfg /setactive $standardUltimateGuid 2>$null
+                    Write-Host "Power profile set to Ultimate Performance (via standard GUID)"
+                } elseif ($powerSchemes -match $standardHighGuid) {
+                    powercfg /setactive $standardHighGuid 2>$null
+                    Write-Host "Power profile set to High Performance (via standard GUID)"
+                } else {
+                    Write-Warning "Performance power profile not found. Available profiles:"
+                    $powerSchemes | ForEach-Object { Write-Host "  $_" }
+                }
+            }
+        }
+    } catch {
+        Write-Warning "Failed to set power profile: $_"
     }
     Write-Host "Done: Setting power profile to Performance"
     # ---------------
