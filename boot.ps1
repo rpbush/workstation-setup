@@ -826,7 +826,22 @@ else {
         Write-Host "MAS_AIO.cmd not found locally, attempting to download from GitHub..."
         try {
             $masAioUrl = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/MAS_AIO.cmd"
-            Invoke-WebRequest -Uri $masAioUrl -OutFile $masAioPath -ErrorAction Stop
+            # Download the file
+            $response = Invoke-WebRequest -Uri $masAioUrl -ErrorAction Stop
+            
+            # Convert LF to CRLF and ensure newline at end (fixes line ending issues)
+            $content = $response.Content
+            # Replace LF with CRLF (but not if already CRLF)
+            if ($content -notmatch "`r`n") {
+                $content = $content -replace "`n", "`r`n"
+            }
+            # Ensure file ends with newline
+            if ($content -notmatch "`r?`n$") {
+                $content += "`r`n"
+            }
+            
+            # Write with UTF-8 encoding (no BOM) and CRLF line endings
+            [System.IO.File]::WriteAllText($masAioPath, $content, [System.Text.Encoding]::UTF8)
             Write-Host "Successfully downloaded MAS_AIO.cmd from GitHub"
         } catch {
             Write-Warning "Failed to download MAS_AIO.cmd from GitHub: $_"
