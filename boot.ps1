@@ -522,101 +522,10 @@ else {
     } catch {
         Write-Warning "Failed to install Windows Sandbox feature: $_"
     }
-    Write-Host "Done: Installing Windows Features"
-    # ---------------
-    # Setting power profile to Performance/Ultimate Performance
-    Write-Host "Start: Setting power profile to Performance"
-    # Try Ultimate Performance first (highest), then High Performance
-    $ultimatePerfGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-    $highPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
     
-    # Check if Ultimate Performance exists
-    $powerSchemes = powercfg /list
-    if ($powerSchemes -match $ultimatePerfGuid) {
-        powercfg /setactive $ultimatePerfGuid
-        Write-Host "Power profile set to Ultimate Performance"
-    } elseif ($powerSchemes -match $highPerfGuid) {
-        powercfg /setactive $highPerfGuid
-        Write-Host "Power profile set to High Performance"
-    } else {
-        Write-Warning "Performance power profile not found"
-    }
-    Write-Host "Done: Setting power profile to Performance"
-    # ---------------
-    # Setting system tray to show all icons
-    Write-Host "Start: Setting system tray to show all icons"
-    try {
-        # Clear the hidden icons list in the system tray
-        $trayNotifyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TrayNotify"
-        if (Test-Path $trayNotifyPath) {
-            # Remove the IconStreams and PastIconsStream values which contain hidden icon data
-            Remove-ItemProperty -Path $trayNotifyPath -Name "IconStreams" -ErrorAction SilentlyContinue
-            Remove-ItemProperty -Path $trayNotifyPath -Name "PastIconsStream" -ErrorAction SilentlyContinue
-            Write-Host "Cleared system tray hidden icons list"
-        }
-        
-        # Set registry to always show all icons (Windows 10/11)
-        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-        if (-not (Test-Path $explorerPath)) {
-            New-Item -Path $explorerPath -Force | Out-Null
-        }
-        
-        # Enable "Always show all icons in the notification area" setting
-        # This is controlled by the EnableAutoTray DWORD value (0 = show all, 1 = hide some)
-        Set-ItemProperty -Path $explorerPath -Name "EnableAutoTray" -Value 0 -Type DWORD -Force
-        Write-Host "System tray configured to show all icons"
-        
-        # Restart Explorer to apply changes (optional, but ensures immediate effect)
-        # Get-Process explorer | Stop-Process -Force
-        # Start-Sleep -Seconds 2
-        # Start-Process explorer.exe
-        
-    } catch {
-        Write-Warning "Failed to configure system tray: $_"
-    }
-    Write-Host "Done: Setting system tray to show all icons"
-    # ---------------
-    # Mapping network drives
-    Write-Host "Start: Mapping network drives"
-    try {
-        # NFS Client feature installation moved to start of script (may require reboot)
-        # Windows Sandbox feature installation moved to Windows Features section
-        
-        # Map N: drive to NFS:/media (NFS Network)
-        $nDrive = "N:"
-        $nPath = "NFS:/media"
-        Write-Host "Mapping $nDrive to $nPath"
-        # Remove existing mapping if it exists
-        net use $nDrive /delete /yes 2>$null
-        # Create persistent mapping
-        net use $nDrive $nPath /persistent:yes | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully mapped $nDrive to $nPath"
-        } else {
-            Write-Warning "Failed to map $nDrive to $nPath (may not be available yet)"
-        }
-        
-        # Map S: drive to \\FS-1\Storage (Windows Network)
-        $sDrive = "S:"
-        $sPath = "\\FS-1\Storage"
-        Write-Host "Mapping $sDrive to $sPath"
-        # Remove existing mapping if it exists
-        net use $sDrive /delete /yes 2>$null
-        # Create persistent mapping
-        net use $sDrive $sPath /persistent:yes | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully mapped $sDrive to $sPath"
-        } else {
-            Write-Warning "Failed to map $sDrive to $sPath (may not be available yet)"
-        }
-    } catch {
-        Write-Warning "Failed to map network drives: $_"
-    }
-    Write-Host "Done: Mapping network drives"
-    # ---------------
     # Installing Windows Subsystem for Linux (WSL)
     # Reference: https://learn.microsoft.com/en-us/windows/wsl/
-    Write-Host "Start: Installing Windows Subsystem for Linux (WSL)"
+    Write-Host "Installing Windows Subsystem for Linux (WSL)..."
     try {
         # Check if WSL is already installed
         $wslInstalled = $false
@@ -714,7 +623,97 @@ else {
         Write-Host "You can install WSL manually using: wsl --install"
         Write-Host "Documentation: https://learn.microsoft.com/en-us/windows/wsl/install"
     }
-    Write-Host "Done: Installing Windows Subsystem for Linux (WSL)"
+    Write-Host "Done: Installing Windows Features"
+    # ---------------
+    # Setting power profile to Performance/Ultimate Performance
+    Write-Host "Start: Setting power profile to Performance"
+    # Try Ultimate Performance first (highest), then High Performance
+    $ultimatePerfGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+    $highPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+    
+    # Check if Ultimate Performance exists
+    $powerSchemes = powercfg /list
+    if ($powerSchemes -match $ultimatePerfGuid) {
+        powercfg /setactive $ultimatePerfGuid
+        Write-Host "Power profile set to Ultimate Performance"
+    } elseif ($powerSchemes -match $highPerfGuid) {
+        powercfg /setactive $highPerfGuid
+        Write-Host "Power profile set to High Performance"
+    } else {
+        Write-Warning "Performance power profile not found"
+    }
+    Write-Host "Done: Setting power profile to Performance"
+    # ---------------
+    # Setting system tray to show all icons
+    Write-Host "Start: Setting system tray to show all icons"
+    try {
+        # Clear the hidden icons list in the system tray
+        $trayNotifyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TrayNotify"
+        if (Test-Path $trayNotifyPath) {
+            # Remove the IconStreams and PastIconsStream values which contain hidden icon data
+            Remove-ItemProperty -Path $trayNotifyPath -Name "IconStreams" -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $trayNotifyPath -Name "PastIconsStream" -ErrorAction SilentlyContinue
+            Write-Host "Cleared system tray hidden icons list"
+        }
+        
+        # Set registry to always show all icons (Windows 10/11)
+        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        if (-not (Test-Path $explorerPath)) {
+            New-Item -Path $explorerPath -Force | Out-Null
+        }
+        
+        # Enable "Always show all icons in the notification area" setting
+        # This is controlled by the EnableAutoTray DWORD value (0 = show all, 1 = hide some)
+        Set-ItemProperty -Path $explorerPath -Name "EnableAutoTray" -Value 0 -Type DWORD -Force
+        Write-Host "System tray configured to show all icons"
+        
+        # Restart Explorer to apply changes (optional, but ensures immediate effect)
+        # Get-Process explorer | Stop-Process -Force
+        # Start-Sleep -Seconds 2
+        # Start-Process explorer.exe
+        
+    } catch {
+        Write-Warning "Failed to configure system tray: $_"
+    }
+    Write-Host "Done: Setting system tray to show all icons"
+    # ---------------
+    # Mapping network drives
+    Write-Host "Start: Mapping network drives"
+    try {
+        # NFS Client feature installation moved to start of script (may require reboot)
+        # Windows Sandbox feature installation moved to Windows Features section
+        
+        # Map N: drive to NFS:/media (NFS Network)
+        $nDrive = "N:"
+        $nPath = "NFS:/media"
+        Write-Host "Mapping $nDrive to $nPath"
+        # Remove existing mapping if it exists
+        net use $nDrive /delete /yes 2>$null
+        # Create persistent mapping
+        net use $nDrive $nPath /persistent:yes | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Successfully mapped $nDrive to $nPath"
+        } else {
+            Write-Warning "Failed to map $nDrive to $nPath (may not be available yet)"
+        }
+        
+        # Map S: drive to \\FS-1\Storage (Windows Network)
+        $sDrive = "S:"
+        $sPath = "\\FS-1\Storage"
+        Write-Host "Mapping $sDrive to $sPath"
+        # Remove existing mapping if it exists
+        net use $sDrive /delete /yes 2>$null
+        # Create persistent mapping
+        net use $sDrive $sPath /persistent:yes | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Successfully mapped $sDrive to $sPath"
+        } else {
+            Write-Warning "Failed to map $sDrive to $sPath (may not be available yet)"
+        }
+    } catch {
+        Write-Warning "Failed to map network drives: $_"
+    }
+    Write-Host "Done: Mapping network drives"
     # ---------------
     # Installing Windows Terminal
     # Reference: https://learn.microsoft.com/en-us/windows/terminal/
