@@ -400,11 +400,13 @@ if (!$isAdmin) {
    Start-Process shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App
 
    Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin 
-   # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
-   winget configuration -f $dscNonAdmin --accept-package-agreements --accept-source-agreements 
+   # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+   winget configuration -f $dscNonAdmin --accept-configuration-agreements 
    
    # clean up, Clean up, everyone wants to clean up
-   Remove-Item $dscNonAdmin -verbose
+   if (Test-Path $dscNonAdmin) {
+       Remove-Item $dscNonAdmin -verbose
+   }
 
    # restarting for Admin now
 	Start-Process PowerShell -wait -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$pwd'; & '$mypath' $Args;`"";
@@ -413,6 +415,43 @@ if (!$isAdmin) {
 else {
    # admin section now
    # ---------------
+    # ---------------
+    # Adding Microsoft Account (MSA) sign-in
+    # Note: Windows does not provide a direct command-line method to add a Microsoft account
+    # The process requires user interaction through the Windows Settings GUI
+    Write-Host "Start: Microsoft Account sign-in"
+    try {
+        # Prompt user for email address
+        $msaEmail = Read-Host "Enter your Microsoft Account email address (or press Enter to skip)"
+        
+        if ($msaEmail -and $msaEmail.Trim() -ne "") {
+            Write-Host "Opening Windows Settings to sign in with Microsoft Account: $msaEmail"
+            Write-Host ""
+            Write-Host "Note: Windows does not support command-line Microsoft account sign-in." -ForegroundColor Yellow
+            Write-Host "You will need to complete the sign-in process in the Settings window." -ForegroundColor Yellow
+            Write-Host ""
+            
+            # Open Windows Settings to the Accounts page for adding a Microsoft account
+            # This opens the "Add a Microsoft account" page
+            Start-Process "ms-settings:emailandaccounts" -ErrorAction Stop
+            
+            Write-Host "Instructions:" -ForegroundColor Cyan
+            Write-Host "1. In the Settings window, click 'Add a Microsoft account' or 'Add account'"
+            Write-Host "2. Enter your email: $msaEmail"
+            Write-Host "3. Enter your password and follow the authentication prompts"
+            Write-Host "4. Complete any additional verification steps (if required)"
+            Write-Host ""
+            Write-Host "Press any key after you've completed the Microsoft Account sign-in (or to skip)..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            Write-Host ""
+        } else {
+            Write-Host "Microsoft Account sign-in skipped."
+        }
+    } catch {
+        Write-Warning "Failed to open account settings: $_"
+        Write-Host "You can manually add your Microsoft Account from Settings > Accounts > Email & accounts"
+    }
+    Write-Host "Done: Microsoft Account sign-in"
     # ---------------
     # Setting power profile to Performance/Ultimate Performance
     Write-Host "Start: Setting power profile to Performance"
@@ -465,6 +504,31 @@ else {
         Write-Warning "Failed to configure system tray: $_"
     }
     Write-Host "Done: Setting system tray to show all icons"
+    # ---------------
+    # Setting Windows to Dark Mode
+    Write-Host "Start: Setting Windows to Dark Mode"
+    try {
+        $personalizePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        
+        # Create the Personalize key if it doesn't exist
+        if (-not (Test-Path $personalizePath)) {
+            New-Item -Path $personalizePath -Force | Out-Null
+        }
+        
+        # Set AppsUseLightTheme to 0 (Dark mode for apps)
+        Set-ItemProperty -Path $personalizePath -Name "AppsUseLightTheme" -Value 0 -Type DWORD -Force
+        Write-Host "App mode set to Dark"
+        
+        # Set SystemUsesLightTheme to 0 (Dark mode for Windows)
+        Set-ItemProperty -Path $personalizePath -Name "SystemUsesLightTheme" -Value 0 -Type DWORD -Force
+        Write-Host "Windows mode set to Dark"
+        
+        # Note: Changes may require restarting Explorer or signing out/in to fully apply
+        Write-Host "Dark mode enabled. Some changes may require restarting Explorer to take full effect."
+    } catch {
+        Write-Warning "Failed to set Windows to Dark Mode: $_"
+    }
+    Write-Host "Done: Setting Windows to Dark Mode"
     # ---------------
     # Mapping network drives
     Write-Host "Start: Mapping network drives"
@@ -742,33 +806,74 @@ else {
 
     gpupdate /force
 
-    Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice 
-    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
-    winget configuration -f $dscOffice --accept-package-agreements --accept-source-agreements 
-    Remove-Item $dscOffice -verbose
-    Start-Process outlook.exe
-    Start-Process ms-teams.exe
+    try {
+        Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+    } catch {
+        Write-Warning "Failed to download Office DSC configuration: $_"
+        Write-Host "Skipping Office installation due to download failure"
+        return
+    }
+    
+    # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+    winget configuration -f $dscOffice --accept-configuration-agreements 
+    
+    if (Test-Path $dscOffice) {
+        Remove-Item $dscOffice -verbose
+    }
+    
+    # Start Outlook and Teams if they exist
+    $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+    if ($outlookPath) {
+        Start-Process outlook.exe -ErrorAction SilentlyContinue
+    } else {
+        Write-Warning "Outlook.exe not found. Office may not be installed yet."
+    }
+    
+    $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+    if ($teamsPath) {
+        Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+    } else {
+        Write-Warning "ms-teams.exe not found. Teams may not be installed yet."
+    }
     Write-Host "Done: Office install"
     # Ending office workload
     # ---------------
    # Forcing Windows Update -- goal is move to dsc
    Write-Host "Start: Windows Update"
-    $UpdateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
-    $Searcher = New-Object -ComObject Microsoft.Update.Searcher
-    $Session = New-Object -ComObject Microsoft.Update.Session
-    $Installer = New-Object -ComObject Microsoft.Update.Installer
+   try {
+        # Check if Windows Update service is available
+        $wuService = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+        if (-not $wuService) {
+            Write-Warning "Windows Update service not available. Skipping Windows Update."
+            Write-Host "Done: Windows Update (skipped)"
+            return
+        }
+        
+        $UpdateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
+        $Searcher = New-Object -ComObject Microsoft.Update.Searcher
+        $Session = New-Object -ComObject Microsoft.Update.Session
+        $Installer = New-Object -ComObject Microsoft.Update.Installer
  
-    $Searcher.ServerSelection = 2
+        $Searcher.ServerSelection = 2
  
-    $Result = $Searcher.Search("IsInstalled=0 and IsHidden=0")
+        $Result = $Searcher.Search("IsInstalled=0 and IsHidden=0")
+        
+        if ($Result -and $Result.Updates -and $Result.Updates.Count -gt 0) {
+            $Downloader = $Session.CreateUpdateDownloader()
+            $Downloader.Updates = $Result.Updates
+            $Downloader.Download()
  
-    $Downloader = $Session.CreateUpdateDownloader()
-    $Downloader.Updates = $Result.Updates
-    $Downloader.Download()
- 
-    $Installer.Updates = $Result.Updates
-    $Installer.Install()
-    Write-Host "Done: Windows Update"
+            $Installer.Updates = $Result.Updates
+            $Installer.Install()
+            Write-Host "Windows Update completed successfully"
+        } else {
+            Write-Host "No updates available or update search returned no results"
+        }
+   } catch {
+        Write-Warning "Windows Update failed: $_"
+        Write-Host "This may be normal if Windows Update service is not available or there are no updates"
+   }
+   Write-Host "Done: Windows Update"
     # Forcing Windows Update complete 
 
     # Staring dev workload
@@ -781,7 +886,14 @@ else {
     if ($secondDriveExists) {
         Write-Host "Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation from C: drive."
         Write-Host "Downloading DSC configuration..."
-        Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin
+        try {
+            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to download Dev flows DSC configuration: $_"
+            Write-Host "Skipping Dev flows installation due to download failure"
+            Write-Host "Done: Dev flows install (skipped)"
+            return
+        }
         
         # Remove Dev Drive resource from DSC file if it exists
         $dscLines = Get-Content $dscAdmin
@@ -838,18 +950,27 @@ else {
         }
     } else {
         Write-Host "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive."
-        Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin
+        try {
+            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to download Dev flows DSC configuration: $_"
+            Write-Host "Skipping Dev flows installation due to download failure"
+            Write-Host "Done: Dev flows install (skipped)"
+            return
+        }
     }
     
-    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
-    winget configuration -f $dscAdmin --accept-package-agreements --accept-source-agreements
+    # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+    winget configuration -f $dscAdmin --accept-configuration-agreements
 
     Write-Host "Start: PowerToys dsc install"
-    # Use --accept-package-agreements and --accept-source-agreements as per Microsoft best practices
-    winget configuration -f $dscPowerToysEnterprise --accept-package-agreements --accept-source-agreements # no cleanup needed as this is intentionally local
+    # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+    winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements # no cleanup needed as this is intentionally local
    
     # clean up, Clean up, everyone wants to clean up
-    Remove-Item $dscAdmin -verbose
+    if (Test-Path $dscAdmin) {
+        Remove-Item $dscAdmin -verbose
+    }
     Write-Host "Done: Dev flows install"
     # ending dev workload
     
