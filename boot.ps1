@@ -10,51 +10,26 @@ $ConfirmPreference = 'None'
 $ErrorActionPreference = 'Continue'
 
 # Bootstrap WinGet using PowerShell module (works in Windows Sandbox and other environments)
+# Method from official WinGet documentation: https://learn.microsoft.com/en-us/windows/package-manager/
 Write-Host "Installing WinGet PowerShell module from PSGallery..."
+
+# Install NuGet package provider (method from WinGet documentation)
+Install-PackageProvider -Name NuGet -Force | Out-Null
+
+# Install Microsoft.WinGet.Client module (method from WinGet documentation)
+Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
+
+Write-Host "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..."
+
+# Bootstrap WinGet using the PowerShell module (method from WinGet documentation)
 try {
-    # Install NuGet package provider if not available (non-interactive)
-    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-        # Set TLS 1.2 for secure download (required for NuGet provider)
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        
-        # Manually download and install NuGet provider to avoid interactive prompts
-        Write-Host "Downloading NuGet provider..."
-        $nugetProviderUrl = "https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll"
-        $nugetProviderPath = "$env:TEMP\Microsoft.PackageManagement.NuGetProvider.dll"
-        
-        try {
-            Invoke-WebRequest -Uri $nugetProviderUrl -OutFile $nugetProviderPath -ErrorAction Stop
-            # Install the provider using the downloaded DLL
-            $null = Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-        } catch {
-            Write-Warning "Failed to download NuGet provider manually, trying alternative method: $_"
-            # Fallback: Use -MinimumVersion with -Force (this sometimes works better)
-            $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue 2>&1 | Out-Null
-            Start-Sleep -Seconds 2
-        }
-    }
-    
-    # Install Microsoft.WinGet.Client module if not available
-    if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
-        Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Scope CurrentUser | Out-Null
-    }
-    
-    # Import the module
-    Import-Module Microsoft.WinGet.Client -Force -ErrorAction SilentlyContinue
-    
-    Write-Host "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..."
-    try {
-        Repair-WinGetPackageManager -AllUsers -ErrorAction Stop
-        Write-Host "WinGet bootstrapped successfully via PowerShell module"
-    } catch {
-        Write-Warning "Repair-WinGetPackageManager failed: $_"
-        Write-Host "Will continue with manual WinGet installation..."
-    }
+    Repair-WinGetPackageManager -AllUsers -ErrorAction Stop
+    Write-Host "WinGet bootstrapped successfully via PowerShell module"
 } catch {
-    Write-Warning "Failed to install WinGet PowerShell module: $_"
-    Write-Host "Will continue with manual WinGet installation method..."
+    Write-Warning "Repair-WinGetPackageManager failed: $_"
+    Write-Host "Will continue with manual WinGet installation..."
 }
+
 Write-Host "Done bootstrapping WinGet."
 
 # Check if WinGet is installed and get version
