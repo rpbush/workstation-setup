@@ -20,24 +20,6 @@ properties:
         FSFormat: 'ReFS'
         Size: '75Gb'
 
-    # Windows settings
-    - resource: Microsoft.Windows.Developer/WindowsExplorer
-      directives:
-        description: File Explorer settings
-        allowPrerelease: true
-      settings:
-        FileExtensions: Show
-        HiddenFiles: Show
-
-    - resource: Microsoft.Windows.Developer/Taskbar
-      directives:
-        description: Taskbar settings
-        allowPrerelease: true
-      settings:
-        SearchboxMode: Hide
-        TaskViewButton: Hide
-        WidgetsButton: Hide
-
     # Install Git
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: git.git
