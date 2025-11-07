@@ -14,11 +14,25 @@ Write-Host "Installing WinGet PowerShell module from PSGallery..."
 try {
     # Install NuGet package provider if not available (non-interactive)
     if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-        # Force installation without prompting - automatically download and install
-        # Use -ForceBootstrap to automatically download, and pipe to Out-Null to suppress prompts
-        $null = Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ForceBootstrap -SkipPublisherCheck -ErrorAction SilentlyContinue
-        # Wait a moment for installation to complete
-        Start-Sleep -Seconds 2
+        # Set TLS 1.2 for secure download (required for NuGet provider)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        
+        # Manually download and install NuGet provider to avoid interactive prompts
+        Write-Host "Downloading NuGet provider..."
+        $nugetProviderUrl = "https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll"
+        $nugetProviderPath = "$env:TEMP\Microsoft.PackageManagement.NuGetProvider.dll"
+        
+        try {
+            Invoke-WebRequest -Uri $nugetProviderUrl -OutFile $nugetProviderPath -ErrorAction Stop
+            # Install the provider using the downloaded DLL
+            $null = Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        } catch {
+            Write-Warning "Failed to download NuGet provider manually, trying alternative method: $_"
+            # Fallback: Use -MinimumVersion with -Force (this sometimes works better)
+            $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+        }
     }
     
     # Install Microsoft.WinGet.Client module if not available
