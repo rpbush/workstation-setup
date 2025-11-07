@@ -501,6 +501,29 @@ else {
     }
     Write-Host "Done: Microsoft Account sign-in"
     # ---------------
+    # Installing Windows Features
+    Write-Host "Start: Installing Windows Features"
+    try {
+        # Install Windows Sandbox feature
+        Write-Host "Checking for Windows Sandbox feature..."
+        $sandboxFeatureName = "Containers-DisposableClientVM"
+        $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
+        if ($sandboxFeature) {
+            if ($sandboxFeature.State -ne "Enabled") {
+                Write-Host "Installing Windows Sandbox feature - this may take a few minutes..."
+                Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart | Out-Null
+                Write-Host "Windows Sandbox feature installed"
+            } else {
+                Write-Host "Windows Sandbox feature already installed"
+            }
+        } else {
+            Write-Warning "Could not find Windows Sandbox feature. It may not be available on this Windows edition."
+        }
+    } catch {
+        Write-Warning "Failed to install Windows Sandbox feature: $_"
+    }
+    Write-Host "Done: Installing Windows Features"
+    # ---------------
     # Setting power profile to Performance/Ultimate Performance
     Write-Host "Start: Setting power profile to Performance"
     # Try Ultimate Performance first (highest), then High Performance
@@ -557,21 +580,7 @@ else {
     Write-Host "Start: Mapping network drives"
     try {
         # NFS Client feature installation moved to start of script (may require reboot)
-        # Install Windows Sandbox feature
-        Write-Host "Checking for Windows Sandbox feature..."
-        $sandboxFeatureName = "Containers-DisposableClientVM"
-        $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
-        if ($sandboxFeature) {
-            if ($sandboxFeature.State -ne "Enabled") {
-                Write-Host "Installing Windows Sandbox feature - this may take a few minutes..."
-                Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart | Out-Null
-                Write-Host "Windows Sandbox feature installed"
-            } else {
-                Write-Host "Windows Sandbox feature already installed"
-            }
-        } else {
-            Write-Warning "Could not find Windows Sandbox feature. It may not be available on this Windows edition."
-        }
+        # Windows Sandbox feature installation moved to Windows Features section
         
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
