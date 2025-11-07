@@ -32,6 +32,61 @@ try {
 
 Write-Host "Done bootstrapping WinGet."
 
+# ---------------
+# Installing NFS Client feature (moved to start as it may require reboot)
+Write-Host "Start: Installing NFS Client feature"
+$nfsNeedsReboot = $false
+try {
+    # Try different feature names depending on Windows version
+    $nfsFeatureNames = @("ClientForNFS-Infrastructure", "ServicesForNFS-ClientOnly")
+    $nfsInstalled = $false
+    
+    foreach ($featureName in $nfsFeatureNames) {
+        $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+        if ($nfsFeature) {
+            if ($nfsFeature.State -ne "Enabled") {
+                Write-Host "Installing NFS Client feature ($featureName) - this may take a few minutes..."
+                Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart | Out-Null
+                Write-Host "NFS Client feature installed"
+                $nfsInstalled = $true
+                $nfsNeedsReboot = $true
+                break
+            } else {
+                Write-Host "NFS Client feature already installed"
+                $nfsInstalled = $true
+                break
+            }
+        }
+    }
+    
+    if (-not $nfsInstalled) {
+        Write-Warning "Could not find or install NFS Client feature. NFS drive mapping may fail."
+    }
+    
+    # Prompt for reboot if NFS was just installed
+    if ($nfsNeedsReboot) {
+        Write-Host ""
+        Write-Host "NFS Client feature requires a system restart to function properly." -ForegroundColor Yellow
+        Write-Host "Please restart your computer now, then run this script again to continue." -ForegroundColor Yellow
+        Write-Host ""
+        $rebootChoice = Read-Host "Would you like to restart now? (Y/N)"
+        if ($rebootChoice -eq 'Y' -or $rebootChoice -eq 'y') {
+            Write-Host "Restarting computer in 10 seconds... Press Ctrl+C to cancel"
+            Start-Sleep -Seconds 10
+            Restart-Computer -Force
+            exit
+        } else {
+            Write-Host "Skipping reboot. Please restart manually and run this script again to continue."
+            Write-Host "The script will continue, but NFS drive mapping may fail until after reboot."
+            Write-Host ""
+        }
+    }
+} catch {
+    Write-Warning "Failed to install NFS Client feature: $_"
+}
+Write-Host "Done: Installing NFS Client feature"
+# ---------------
+
 # Check if WinGet is installed and get version
 # According to Microsoft documentation: https://learn.microsoft.com/en-us/windows/package-manager/
 # WinGet is included in Windows 10 version 1809+ and Windows 11 as part of App Installer
@@ -498,61 +553,10 @@ else {
     }
     Write-Host "Done: Setting system tray to show all icons"
     # ---------------
-    # Setting Windows to Dark Mode
-    Write-Host "Start: Setting Windows to Dark Mode"
-    try {
-        $personalizePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        
-        # Create the Personalize key if it doesn't exist
-        if (-not (Test-Path $personalizePath)) {
-            New-Item -Path $personalizePath -Force | Out-Null
-        }
-        
-        # Set AppsUseLightTheme to 0 (Dark mode for apps)
-        Set-ItemProperty -Path $personalizePath -Name "AppsUseLightTheme" -Value 0 -Type DWORD -Force
-        Write-Host "App mode set to Dark"
-        
-        # Set SystemUsesLightTheme to 0 (Dark mode for Windows)
-        Set-ItemProperty -Path $personalizePath -Name "SystemUsesLightTheme" -Value 0 -Type DWORD -Force
-        Write-Host "Windows mode set to Dark"
-        
-        # Note: Changes may require restarting Explorer or signing out/in to fully apply
-        Write-Host "Dark mode enabled. Some changes may require restarting Explorer to take full effect."
-    } catch {
-        Write-Warning "Failed to set Windows to Dark Mode: $_"
-    }
-    Write-Host "Done: Setting Windows to Dark Mode"
-    # ---------------
     # Mapping network drives
     Write-Host "Start: Mapping network drives"
     try {
-        # Install NFS Client feature if not already installed (required for NFS drive mapping)
-        Write-Host "Checking for NFS Client feature..."
-        # Try different feature names depending on Windows version
-        $nfsFeatureNames = @("ClientForNFS-Infrastructure", "ServicesForNFS-ClientOnly")
-        $nfsInstalled = $false
-        
-        foreach ($featureName in $nfsFeatureNames) {
-            $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
-            if ($nfsFeature) {
-                if ($nfsFeature.State -ne "Enabled") {
-                    Write-Host "Installing NFS Client feature ($featureName) - this may take a few minutes..."
-                    Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart | Out-Null
-                    Write-Host "NFS Client feature installed"
-                    $nfsInstalled = $true
-                    break
-                } else {
-                    Write-Host "NFS Client feature already installed"
-                    $nfsInstalled = $true
-                    break
-                }
-            }
-        }
-        
-        if (-not $nfsInstalled) {
-            Write-Warning "Could not find or install NFS Client feature. NFS drive mapping may fail."
-        }
-        
+        # NFS Client feature installation moved to start of script (may require reboot)
         # Install Windows Sandbox feature
         Write-Host "Checking for Windows Sandbox feature..."
         $sandboxFeatureName = "Containers-DisposableClientVM"
