@@ -18,7 +18,7 @@ function Write-Log {
         [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS', 'SECTION_START', 'SECTION_END')]
         [string]$Level = 'INFO',
         [Parameter(Mandatory=$false)]
-        [Exception]$Exception = $null,
+        [object]$Exception = $null,
         [Parameter(Mandatory=$false)]
         [string]$Section = ''
     )
