@@ -2247,16 +2247,22 @@ else {
 
     Start-Section "PowerToys Installation"
     try {
-        Write-Log "Running winget configuration for PowerToys Enterprise DSC" -Level 'INFO' -Section "PowerToys Installation"
-        $configStart = Get-Date
-        $configOutput = winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements 2>&1
-        $configDuration = (Get-Date) - $configStart
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "PowerToys DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "PowerToys Installation"
+        # Check if PowerToys Enterprise DSC file exists (only if Dev Drive was created)
+        if (Test-Path $dscPowerToysEnterprise) {
+            Write-Log "Running winget configuration for PowerToys Enterprise DSC" -Level 'INFO' -Section "PowerToys Installation"
+            $configStart = Get-Date
+            $configOutput = winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements 2>&1
+            $configDuration = (Get-Date) - $configStart
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "PowerToys DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "PowerToys Installation"
+            } else {
+                $script:ErrorCount++
+                Write-Log "PowerToys DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "PowerToys Installation"
+                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "PowerToys Installation"
+            }
         } else {
-            $script:ErrorCount++
-            Write-Log "PowerToys DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "PowerToys Installation"
-            Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "PowerToys Installation"
+            Write-Log "PowerToys Enterprise DSC file not found: $dscPowerToysEnterprise" -Level 'INFO' -Section "PowerToys Installation"
+            Write-Log "Skipping PowerToys Enterprise configuration (Dev Drive may not have been created or PowerToys repository not cloned)" -Level 'INFO' -Section "PowerToys Installation"
         }
     } catch {
         $script:ErrorCount++
