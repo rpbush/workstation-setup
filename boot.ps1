@@ -1242,7 +1242,8 @@ else {
         # NFS Client feature installation moved to start of script (may require reboot)
         # Windows Sandbox feature installation moved to Windows Features section
         
-        # Prompt for and store credentials at the start (used for both NFS and SMB drives)
+        # Prompt for credentials at the start (used for both NFS and SMB drives)
+        # Store credentials in Windows Credential Manager for persistent use
         $sDrive = "S:"
         $sPath = "\\FS-1\Storage"
         $serverName = ($sPath -split '\\')[2]
@@ -1276,6 +1277,7 @@ else {
             Write-Host "Network drives require credentials to map." -ForegroundColor Yellow
             Write-Host "Please enter your credentials to store them in Windows Credential Manager." -ForegroundColor Yellow
             Write-Host "These credentials will be used for both N: (NFS) and S: (SMB) drive mappings." -ForegroundColor Yellow
+            Write-Host "Credentials will be stored securely and persist for future use." -ForegroundColor Yellow
             Write-Host ""
             
             try {
@@ -1361,6 +1363,7 @@ else {
         
         # Create persistent mapping
         Write-Log "Creating NFS mapping to $nPath..." -Level 'INFO' -Section "Network Drive Mapping"
+        # NFS will use stored credentials automatically if available, or try without if not needed
         $mapResult = net use $nDrive $nPath /persistent:yes 2>&1
         $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
@@ -1463,16 +1466,16 @@ else {
         # Create persistent mapping
         Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
         
-        # If credentials are stored (either already existed or just stored), attempt mapping
+        # Attempt mapping - net use will automatically use stored credentials from credential manager
         $mapSuccess = $false
         $mapOutput = ""
         $mapExitCode = -1
         
         if ($credentialsStored) {
-            Write-Log "Attempting to map drive using stored credentials..." -Level 'INFO' -Section "Network Drive Mapping"
+            Write-Log "Attempting to map drive using stored credentials from credential manager..." -Level 'INFO' -Section "Network Drive Mapping"
             
             try {
-                # Use net use - it will automatically use the stored credentials
+                # Use net use - it will automatically use the stored credentials from credential manager
                 $tempOutput = [System.IO.Path]::GetTempFileName()
                 $tempError = [System.IO.Path]::GetTempFileName()
                 
@@ -1491,11 +1494,11 @@ else {
                 if ($mapExitCode -eq 0) {
                     $mapSuccess = $true
                     Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
-        } else {
+                } else {
                     Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
                     $script:WarningCount++
-        }
-    } catch {
+                }
+            } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to map drive: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
                 $mapExitCode = -1
