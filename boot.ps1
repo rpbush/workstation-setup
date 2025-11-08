@@ -1135,23 +1135,37 @@ else {
             # Wait a moment for the mapping to register
             Start-Sleep -Seconds 2
             
-            # Verify the mapping actually works
-            $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
-            if ($testPath) {
-                Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+            # Check if drive shows up in net use list first
+            $netUseList = net use 2>&1 | Out-String
+            $driveInList = $netUseList -match $nDrive
+            
+            if ($driveInList) {
+                Write-Log "Drive $nDrive appears in net use list" -Level 'INFO' -Section "Network Drive Mapping"
+                
+                # Try to refresh Explorer to show the drive
+                try {
+                    # Refresh Explorer to show new network drives
+                    $shell = New-Object -ComObject Shell.Application
+                    $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -eq "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" } | ForEach-Object { $_.Refresh() }
+                } catch {
+                    # Explorer refresh failed, but continue
+                }
+                
+                # Verify the mapping actually works by trying to access it
+                $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
+                if ($testPath) {
+                    Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                } else {
+                    $script:WarningCount++
+                    Write-Log "Drive $nDrive is mapped but not accessible via Test-Path. It may appear in File Explorer after refresh." -Level 'WARNING' -Section "Network Drive Mapping"
+                    Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                    Write-Log "Note: You may need to refresh File Explorer (F5) or restart Explorer to see the drive" -Level 'WARNING' -Section "Network Drive Mapping"
+                }
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded (exit code 0) but drive is not accessible: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Mapping command succeeded (exit code 0) but drive does not appear in net use list: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "This may indicate the NFS server is not accessible or the path is incorrect" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                
-                # Check if drive shows up in net use list
-                $netUseList = net use 2>&1 | Out-String
-                if ($netUseList -match $nDrive) {
-                    Write-Log "Drive appears in net use list but is not accessible. May need to check NFS server connectivity." -Level 'WARNING' -Section "Network Drive Mapping"
-                } else {
-                    Write-Log "Drive does not appear in net use list. Mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
-                }
             }
         } else {
             $script:ErrorCount++
@@ -1166,15 +1180,24 @@ else {
         $sPath = "\\FS-1\Storage"
         Write-Log "Attempting to map $sDrive to $sPath" -Level 'INFO' -Section "Network Drive Mapping"
         
-        # Test network connectivity to the server first
+        # Test network connectivity to the server first (with timeout to prevent hanging)
         $serverName = ($sPath -split '\\')[2]
         Write-Log "Testing connectivity to server: $serverName" -Level 'INFO' -Section "Network Drive Mapping"
-        $pingResult = Test-Connection -ComputerName $serverName -Count 1 -Quiet -ErrorAction SilentlyContinue
-        if ($pingResult) {
-            Write-Log "Server is reachable" -Level 'INFO' -Section "Network Drive Mapping"
-        } else {
+        try {
+            # Use a job with timeout to prevent hanging
+            $pingJob = Start-Job -ScriptBlock { param($server) Test-Connection -ComputerName $server -Count 1 -Quiet -ErrorAction SilentlyContinue } -ArgumentList $serverName
+            $pingResult = $pingJob | Wait-Job -Timeout 5 | Receive-Job
+            $pingJob | Remove-Job -Force -ErrorAction SilentlyContinue
+            
+            if ($pingResult) {
+                Write-Log "Server is reachable" -Level 'INFO' -Section "Network Drive Mapping"
+            } else {
+                $script:WarningCount++
+                Write-Log "Server $serverName may not be reachable or ping timed out. Will attempt mapping anyway." -Level 'WARNING' -Section "Network Drive Mapping"
+            }
+        } catch {
             $script:WarningCount++
-            Write-Log "Server $serverName may not be reachable. Mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "Could not test server connectivity (may be normal if ping is blocked). Will attempt mapping anyway." -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # Remove existing mapping if it exists
@@ -1189,33 +1212,88 @@ else {
         
         # Create persistent mapping
         Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
-        $mapResult = net use $sDrive $sPath /persistent:yes 2>&1
-        $mapOutput = $mapResult | Out-String
-        $mapExitCode = $LASTEXITCODE
         
-        Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+        # Use a job with timeout to prevent hanging if server requires credentials or is unreachable
+        try {
+            $mapJob = Start-Job -ScriptBlock {
+                param($drive, $path)
+                $result = net use $drive $path /persistent:yes 2>&1
+                return @{
+                    Output = $result | Out-String
+                    ExitCode = $LASTEXITCODE
+                }
+            } -ArgumentList $sDrive, $sPath
+            
+            # Wait for job with 30 second timeout
+            $jobResult = $mapJob | Wait-Job -Timeout 30 | Receive-Job
+            $mapJob | Remove-Job -Force -ErrorAction SilentlyContinue
+            
+            if ($jobResult) {
+                $mapOutput = $jobResult.Output
+                $mapExitCode = $jobResult.ExitCode
+                Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+            } else {
+                # Job timed out or failed
+                $mapJob | Stop-Job -ErrorAction SilentlyContinue
+                $mapJob | Remove-Job -Force -ErrorAction SilentlyContinue
+                $script:ErrorCount++
+                Write-Log "net use command timed out after 30 seconds. Server may be unreachable or waiting for credentials." -Level 'ERROR' -Section "Network Drive Mapping"
+                Write-Log "You may need to map the drive manually: net use $sDrive $sPath /persistent:yes" -Level 'WARNING' -Section "Network Drive Mapping"
+                $mapExitCode = -1
+                $mapOutput = "Command timed out"
+            }
+        } catch {
+            # Fallback to direct net use if job method fails
+            Write-Log "Job method failed, trying direct net use command..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
+            try {
+                $mapResult = net use $sDrive $sPath /persistent:yes 2>&1
+                $mapOutput = $mapResult | Out-String
+                $mapExitCode = $LASTEXITCODE
+                Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Direct net use command also failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                $mapExitCode = -1
+                $mapOutput = "Command failed: $_"
+            }
+        }
         
         if ($mapExitCode -eq 0) {
             # Wait a moment for the mapping to register
             Start-Sleep -Seconds 2
             
-            # Verify the mapping actually works
-            $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
-            if ($testPath) {
-                Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+            # Check if drive shows up in net use list first
+            $netUseList = net use 2>&1 | Out-String
+            $driveInList = $netUseList -match $sDrive
+            
+            if ($driveInList) {
+                Write-Log "Drive $sDrive appears in net use list" -Level 'INFO' -Section "Network Drive Mapping"
+                
+                # Try to refresh Explorer to show the drive
+                try {
+                    # Refresh Explorer to show new network drives
+                    $shell = New-Object -ComObject Shell.Application
+                    $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -eq "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" } | ForEach-Object { $_.Refresh() }
+                } catch {
+                    # Explorer refresh failed, but continue
+                }
+                
+                # Verify the mapping actually works by trying to access it
+                $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
+                if ($testPath) {
+                    Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                } else {
+                    $script:WarningCount++
+                    Write-Log "Drive $sDrive is mapped but not accessible via Test-Path. It may appear in File Explorer after refresh." -Level 'WARNING' -Section "Network Drive Mapping"
+                    Write-Log "This may indicate authentication issues or the share is not accessible" -Level 'WARNING' -Section "Network Drive Mapping"
+                    Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                    Write-Log "Note: You may need to refresh File Explorer (F5) or restart Explorer to see the drive" -Level 'WARNING' -Section "Network Drive Mapping"
+                }
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded (exit code 0) but drive is not accessible: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Mapping command succeeded (exit code 0) but drive does not appear in net use list: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "This may indicate authentication issues or the share is not accessible" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                
-                # Check if drive shows up in net use list
-                $netUseList = net use 2>&1 | Out-String
-                if ($netUseList -match $sDrive) {
-                    Write-Log "Drive appears in net use list but is not accessible. May need credentials or share permissions." -Level 'WARNING' -Section "Network Drive Mapping"
-                } else {
-                    Write-Log "Drive does not appear in net use list. Mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
-                }
             }
         } else {
             $script:ErrorCount++
