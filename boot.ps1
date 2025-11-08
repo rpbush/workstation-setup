@@ -1712,7 +1712,8 @@ else {
         
         $newDscContent = @()
         $skipDevDrive = $false
-        $devDriveIndent = 0
+        $inDevDriveResource = $false
+        $devDriveResourceStart = -1
         
         Write-Log "Processing $($dscLines.Count) lines to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
         
@@ -1725,38 +1726,31 @@ else {
                 Write-Log "Processing line $i of $($dscLines.Count)..." -Level 'INFO' -Section "Dev Flows Installation"
             }
             
-            # Detect start of Dev Drive resource (look for "id: DevDrive1")
-            if ($line -match '^\s+id:\s+DevDrive1') {
-                Write-Log "Found Dev Drive resource at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
-                $devDriveFound = $true
-                $skipDevDrive = $true
-                if ($line -match '^(\s+)') {
-                    $devDriveIndent = $matches[1].Length
-                } else {
-                    $devDriveIndent = 0
-                }
-                # Skip this line and find the start of the resource block (go back to find "resource: Disk")
-                for ($j = $i - 1; $j -ge 0; $j--) {
-                    if ($dscLines[$j] -match '^\s+-\s+resource:\s+Disk') {
-                        # Remove from the resource start
-                        $i = $j - 1
+            # Detect start of Dev Drive resource block
+            if ($line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
+                # Check if next line or nearby has "id: DevDrive1"
+                $checkAhead = [Math]::Min(5, $dscLines.Count - $i - 1)
+                for ($k = 1; $k -le $checkAhead; $k++) {
+                    if ($dscLines[$i + $k] -match '^\s+id:\s+DevDrive1') {
+                        Write-Log "Found Dev Drive resource starting at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
+                        $devDriveFound = $true
+                        $inDevDriveResource = $true
+                        $devDriveResourceStart = $i
+                        # Skip this resource block
                         break
                     }
                 }
-                continue
             }
             
-            # If we're skipping, check if we've reached the end of this resource block
-            if ($skipDevDrive) {
-                $currentIndent = if ($line -match '^(\s*)') { $matches[1].Length } else { 0 }
-                # Check if we've reached a new resource or back to the same indent level as resources list
-                if ($line.Trim() -eq '' -or ($currentIndent -le $devDriveIndent -and ($line -match '^\s+-\s+resource:' -or $line -match '^\s+[a-zA-Z]'))) {
-                    $skipDevDrive = $false
-                    # Add the line if it's not empty or it's a new resource
-                    if ($line.Trim() -ne '') {
-                        $newDscContent += $line
-                    }
+            # If we're in the Dev Drive resource, skip until we find the next resource or end of block
+            if ($inDevDriveResource) {
+                # Check if we've reached the next resource (starts with "    - resource:")
+                if ($line -match '^\s+-\s+resource:' -and $i -gt $devDriveResourceStart) {
+                    # We've reached the next resource, stop skipping
+                    $inDevDriveResource = $false
+                    $newDscContent += $line
                 }
+                # Otherwise, skip this line (don't add it to new content)
                 continue
             }
             
