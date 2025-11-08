@@ -106,6 +106,67 @@ $script:ErrorCount = 0
 $script:WarningCount = 0
 $script:SectionTimings = @{}
 
+# Helper function to check if Windows feature is installed
+function Test-WindowsFeatureInstalled {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FeatureName
+    )
+    
+    try {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $FeatureName -ErrorAction SilentlyContinue
+        if ($feature -and $feature.State -eq "Enabled") {
+            return $true
+        }
+    } catch {
+        # Feature not found or error checking
+    }
+    return $false
+}
+
+# Helper function to check if software is installed via winget
+function Test-SoftwareInstalled {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$PackageId
+    )
+    
+    try {
+        # Refresh PATH to ensure winget is available
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
+        # Check if winget is available
+        $wingetCheck = winget --info 2>$null
+        if (-not $wingetCheck) {
+            return $false
+        }
+        
+        # Use winget list to check if package is installed
+        $listOutput = winget list --id $PackageId --exact 2>&1
+        if ($LASTEXITCODE -eq 0 -and $listOutput -match $PackageId) {
+            return $true
+        }
+    } catch {
+        # Error checking, assume not installed
+    }
+    return $false
+}
+
+# Helper function to check if AppX package is installed
+function Test-AppxPackageInstalled {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$PackageName
+    )
+    
+    try {
+        $package = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
+        return ($null -ne $package)
+    } catch {
+        return $false
+    }
+}
+
 # Section timing helper functions
 function Start-Section {
     param([string]$SectionName)
@@ -173,19 +234,24 @@ try {
     $nfsInstalled = $false
     
     foreach ($featureName in $nfsFeatureNames) {
-        $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
-        if ($nfsFeature) {
-            if ($nfsFeature.State -ne "Enabled") {
-                Write-Host "Installing NFS Client feature ($featureName) - this may take a few minutes..."
-                Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart | Out-Null
-                Write-Host "NFS Client feature installed"
-                $nfsInstalled = $true
-                $nfsNeedsReboot = $true
-                break
-            } else {
-                Write-Host "NFS Client feature already installed"
-                $nfsInstalled = $true
-                break
+        if (Test-WindowsFeatureInstalled -FeatureName $featureName) {
+            Write-Log "NFS Client feature ($featureName) is already installed" -Level 'INFO' -Section "NFS Client Installation"
+            $nfsInstalled = $true
+            break
+        } else {
+            $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+            if ($nfsFeature) {
+                Write-Log "Installing NFS Client feature ($featureName) - this may take a few minutes..." -Level 'INFO' -Section "NFS Client Installation"
+                try {
+                    Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
+                    Write-Log "NFS Client feature ($featureName) installed successfully" -Level 'SUCCESS' -Section "NFS Client Installation"
+                    $nfsInstalled = $true
+                    $nfsNeedsReboot = $true
+                    break
+                } catch {
+                    $script:ErrorCount++
+                    Write-Log "Failed to install NFS Client feature ($featureName)" -Level 'ERROR' -Section "NFS Client Installation" -Exception $_
+                }
             }
         }
     }
@@ -735,20 +801,28 @@ else {
     Write-Host "Start: Installing Windows Features"
     try {
         # Install Windows Sandbox feature
-        Write-Host "Checking for Windows Sandbox feature..."
+        Start-Section "Windows Sandbox Installation"
         $sandboxFeatureName = "Containers-DisposableClientVM"
-        $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
-        if ($sandboxFeature) {
-            if ($sandboxFeature.State -ne "Enabled") {
-                Write-Host "Installing Windows Sandbox feature - this may take a few minutes..."
-                Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart | Out-Null
-                Write-Host "Windows Sandbox feature installed"
-            } else {
-                Write-Host "Windows Sandbox feature already installed"
-            }
+        
+        if (Test-WindowsFeatureInstalled -FeatureName $sandboxFeatureName) {
+            Write-Log "Windows Sandbox feature is already installed" -Level 'INFO' -Section "Windows Sandbox Installation"
         } else {
-            Write-Warning "Could not find Windows Sandbox feature. It may not be available on this Windows edition."
+            $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
+            if ($sandboxFeature) {
+                Write-Log "Installing Windows Sandbox feature - this may take a few minutes..." -Level 'INFO' -Section "Windows Sandbox Installation"
+                try {
+                    Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart -ErrorAction Stop | Out-Null
+                    Write-Log "Windows Sandbox feature installed successfully" -Level 'SUCCESS' -Section "Windows Sandbox Installation"
+                } catch {
+                    $script:ErrorCount++
+                    Write-Log "Failed to install Windows Sandbox feature" -Level 'ERROR' -Section "Windows Sandbox Installation" -Exception $_
+                }
+            } else {
+                $script:WarningCount++
+                Write-Log "Could not find Windows Sandbox feature. It may not be available on this Windows edition." -Level 'WARNING' -Section "Windows Sandbox Installation"
+            }
         }
+        End-Section "Windows Sandbox Installation"
     } catch {
         Write-Warning "Failed to install Windows Sandbox feature: $_"
     }
@@ -797,26 +871,36 @@ else {
                     Write-Host "wsl --install did not complete automatically, trying manual installation..."
                     
                     # Enable WSL feature
-                    Write-Host "Enabling Windows Subsystem for Linux feature..."
-                    $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction SilentlyContinue
-                    if ($wslFeature) {
-                        if ($wslFeature.State -ne "Enabled") {
-                            Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -All -NoRestart | Out-Null
-                            Write-Host "Windows Subsystem for Linux feature enabled"
-                        } else {
-                            Write-Host "Windows Subsystem for Linux feature already enabled"
+                    if (Test-WindowsFeatureInstalled -FeatureName "Microsoft-Windows-Subsystem-Linux") {
+                        Write-Log "Windows Subsystem for Linux feature is already enabled" -Level 'INFO' -Section "WSL Installation"
+                    } else {
+                        Write-Log "Enabling Windows Subsystem for Linux feature..." -Level 'INFO' -Section "WSL Installation"
+                        $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction SilentlyContinue
+                        if ($wslFeature) {
+                            try {
+                                Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -All -NoRestart -ErrorAction Stop | Out-Null
+                                Write-Log "Windows Subsystem for Linux feature enabled successfully" -Level 'SUCCESS' -Section "WSL Installation"
+                            } catch {
+                                $script:ErrorCount++
+                                Write-Log "Failed to enable Windows Subsystem for Linux feature" -Level 'ERROR' -Section "WSL Installation" -Exception $_
+                            }
                         }
                     }
                     
                     # Enable Virtual Machine Platform feature (required for WSL 2)
-                    Write-Host "Enabling Virtual Machine Platform feature (required for WSL 2)..."
-                    $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
-                    if ($vmPlatformFeature) {
-                        if ($vmPlatformFeature.State -ne "Enabled") {
-                            Enable-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -All -NoRestart | Out-Null
-                            Write-Host "Virtual Machine Platform feature enabled"
-                        } else {
-                            Write-Host "Virtual Machine Platform feature already enabled"
+                    if (Test-WindowsFeatureInstalled -FeatureName "VirtualMachinePlatform") {
+                        Write-Log "Virtual Machine Platform feature is already enabled" -Level 'INFO' -Section "WSL Installation"
+                    } else {
+                        Write-Log "Enabling Virtual Machine Platform feature (required for WSL 2)..." -Level 'INFO' -Section "WSL Installation"
+                        $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
+                        if ($vmPlatformFeature) {
+                            try {
+                                Enable-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -All -NoRestart -ErrorAction Stop | Out-Null
+                                Write-Log "Virtual Machine Platform feature enabled successfully" -Level 'SUCCESS' -Section "WSL Installation"
+                            } catch {
+                                $script:ErrorCount++
+                                Write-Log "Failed to enable Virtual Machine Platform feature" -Level 'ERROR' -Section "WSL Installation" -Exception $_
+                            }
                         }
                     }
                     
@@ -1043,9 +1127,9 @@ else {
     Write-Host "Start: Installing Windows Terminal"
     try {
         # Check if Windows Terminal is already installed
-        $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
-        if ($wtInstalled) {
-            Write-Host "Windows Terminal is already installed (Version: $($wtInstalled.Version))"
+        if (Test-AppxPackageInstalled -PackageName "Microsoft.WindowsTerminal") {
+            $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+            Write-Log "Windows Terminal is already installed (Version: $($wtInstalled.Version))" -Level 'INFO' -Section "Windows Terminal Installation"
         } else {
             Write-Host "Installing Windows Terminal using WinGet..."
             Write-Host "Reference: https://learn.microsoft.com/en-us/windows/terminal/install"
@@ -1150,6 +1234,28 @@ else {
     gpupdate /force
 
     Start-Section "Office Installation"
+    
+    # Check if Office is already installed
+    $officeInstalled = $false
+    $teamsInstalled = $false
+    
+    if (Test-SoftwareInstalled -PackageId "Microsoft.Office") {
+        Write-Log "Microsoft Office is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
+        $officeInstalled = $true
+    }
+    
+    if (Test-SoftwareInstalled -PackageId "Microsoft.Teams") {
+        Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
+        $teamsInstalled = $true
+    }
+    
+    # If both are installed, skip DSC configuration
+    if ($officeInstalled -and $teamsInstalled) {
+        Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
+        End-Section "Office Installation"
+        return
+    }
+    
     $officeDscDownloaded = $false
     
     # Check if file exists locally first
