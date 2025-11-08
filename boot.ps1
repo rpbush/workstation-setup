@@ -167,6 +167,50 @@ function Test-AppxPackageInstalled {
     }
 }
 
+# Helper function to prompt user after opening Windows Store
+function Wait-ForStoreInstallation {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$AppName,
+        [Parameter(Mandatory=$false)]
+        [string]$PackageName = $null
+    )
+    
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Windows Store Installation" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "The Microsoft Store has been opened for: $AppName" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Please complete the following steps:" -ForegroundColor White
+    Write-Host "1. In the Microsoft Store window, click 'Get' or 'Install'" -ForegroundColor White
+    Write-Host "2. Wait for the installation to complete" -ForegroundColor White
+    Write-Host "3. Close the Microsoft Store window when done" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Press ENTER after you have completed the installation (or 'S' to skip)..." -ForegroundColor Cyan
+    $response = Read-Host
+    
+    if ($response -eq 'S' -or $response -eq 's') {
+        Write-Log "User skipped $AppName installation" -Level 'WARNING' -Section "Store Installation"
+        return $false
+    }
+    
+    # If package name provided, verify installation
+    if ($PackageName) {
+        Start-Sleep -Seconds 2
+        if (Test-AppxPackageInstalled -PackageName $PackageName) {
+            Write-Log "$AppName installation verified successfully" -Level 'SUCCESS' -Section "Store Installation"
+            return $true
+        } else {
+            Write-Log "$AppName installation could not be verified. It may still be installing." -Level 'WARNING' -Section "Store Installation"
+            return $true  # Assume user completed it
+        }
+    }
+    
+    return $true
+}
+
 # Section timing helper functions
 function Start-Section {
     param([string]$SectionName)
@@ -412,19 +456,21 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
        if ($storeAvailable) {
            # Try Microsoft Store method
            try {
-               Write-Host "Opening Microsoft Store for Windows App Runtime..."
+               Write-Log "Opening Microsoft Store for Windows App Runtime..." -Level 'INFO' -Section "WinGet Bootstrap"
                Start-Process "ms-windows-store://pdp/?ProductId=9P7KNL5RWT25" -ErrorAction Stop
-               Write-Host "Microsoft Store opened. Please click 'Get' or 'Install' if prompted."
-               Write-Host "Waiting for installation to complete..."
-               Start-Sleep -Seconds 10
+               Start-Sleep -Seconds 2  # Give Store time to open
                
-               # Check if it got installed
-               $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
-               if ($appRuntimeInstalled) {
-                   Write-Host "Windows App Runtime installed via Microsoft Store"
+               $installed = Wait-ForStoreInstallation -AppName "Windows App Runtime" -PackageName "Microsoft.WindowsAppRuntime"
+               if ($installed) {
+                   # Check if it got installed
+                   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+                   if ($appRuntimeInstalled) {
+                       Write-Log "Windows App Runtime installed via Microsoft Store" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+                   }
                }
            } catch {
-               Write-Warning "Could not open Microsoft Store for Windows App Runtime: $_"
+               $script:ErrorCount++
+               Write-Log "Could not open Microsoft Store for Windows App Runtime" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
                $storeAvailable = $false
            }
        }
@@ -566,26 +612,26 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
        }
        
        if ($storeAvailable) {
-           Write-Host "Attempting to install WinGet via Microsoft Store (recommended method)..."
-           Write-Host "WinGet is distributed via Microsoft Store for secure installation with certificate pinning."
+           Write-Log "Attempting to install WinGet via Microsoft Store (recommended method)..." -Level 'INFO' -Section "WinGet Bootstrap"
+           Write-Log "WinGet is distributed via Microsoft Store for secure installation with certificate pinning." -Level 'INFO' -Section "WinGet Bootstrap"
            try {
                # Use the official Microsoft Store link for App Installer (which includes WinGet)
                Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction Stop
-               Write-Host "Opened Microsoft Store for App Installer (WinGet)."
-               Write-Host "Please click 'Get' or 'Install' in the Microsoft Store window that opened."
-               Write-Host "Waiting for installation to complete..."
-               # Wait longer for Store installation - user may need to interact
-               Start-Sleep -Seconds 15
+               Start-Sleep -Seconds 2  # Give Store time to open
                
-               # Check if App Installer was installed
-               $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
-               if ($appInstallerCheck) {
-                   Write-Host "App Installer (WinGet) detected after Store installation"
-                   $wingetInstalledSuccessfully = $true
+               $installed = Wait-ForStoreInstallation -AppName "App Installer (WinGet)" -PackageName "Microsoft.DesktopAppInstaller"
+               if ($installed) {
+                   # Check if App Installer was installed
+                   $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
+                   if ($appInstallerCheck) {
+                       Write-Log "App Installer (WinGet) detected after Store installation" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+                       $wingetInstalledSuccessfully = $true
+                   }
                }
            } catch {
-               Write-Warning "Could not open Microsoft Store for WinGet: $_"
-               Write-Host "You can manually install WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
+               $script:ErrorCount++
+               Write-Log "Could not open Microsoft Store for WinGet" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+               Write-Log "You can manually install WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1" -Level 'INFO' -Section "WinGet Bootstrap"
            }
        } else {
            Write-Host "Microsoft Store not available (e.g., Windows Sandbox). WinGet installation may require manual intervention."
@@ -1213,20 +1259,23 @@ else {
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "Windows Terminal installed successfully"
                 } else {
-                    Write-Warning "WinGet installation may have failed. Trying alternative method..."
+                    Write-Log "WinGet installation may have failed. Trying alternative method..." -Level 'WARNING' -Section "Windows Terminal Installation"
                     # Fallback: Try installing via Microsoft Store
                     try {
                         Start-Process "ms-windows-store://pdp/?ProductId=9N0DX20HK701" -ErrorAction Stop
-                        Write-Host "Opened Microsoft Store for Windows Terminal. Please install it if prompted."
-                        Start-Sleep -Seconds 5
+                        Start-Sleep -Seconds 2  # Give Store time to open
                         
-                        # Check if it got installed
-                        $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
-                        if ($wtCheck) {
-                            Write-Host "Windows Terminal installed via Microsoft Store"
+                        $installed = Wait-ForStoreInstallation -AppName "Windows Terminal" -PackageName "Microsoft.WindowsTerminal"
+                        if ($installed) {
+                            # Check if it got installed
+                            $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+                            if ($wtCheck) {
+                                Write-Log "Windows Terminal installed via Microsoft Store" -Level 'SUCCESS' -Section "Windows Terminal Installation"
+                            }
                         }
                     } catch {
-                        Write-Warning "Could not open Microsoft Store for Windows Terminal: $_"
+                        $script:ErrorCount++
+                        Write-Log "Could not open Microsoft Store for Windows Terminal" -Level 'ERROR' -Section "Windows Terminal Installation" -Exception $_
                     }
                 }
             } catch {
@@ -1672,15 +1721,19 @@ else {
                 if ($appInstaller) {
                     Write-Host "WinGet is already installed from Microsoft Store - will receive automatic updates"
                 } else {
-                    Write-Host "Opening Microsoft Store to install/upgrade to Store version for automatic updates..."
+                    Write-Log "Opening Microsoft Store to install/upgrade to Store version for automatic updates..." -Level 'INFO' -Section "WinGet Upgrade"
                     try {
                         Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction Stop
-                        Write-Host "Microsoft Store opened. Please click 'Get' or 'Update' to install the Store version."
-                        Write-Host "The Store version will receive automatic updates from Microsoft."
-                        Start-Sleep -Seconds 5
+                        Start-Sleep -Seconds 2  # Give Store time to open
+                        
+                        $installed = Wait-ForStoreInstallation -AppName "App Installer (WinGet) - Store Version" -PackageName "Microsoft.DesktopAppInstaller"
+                        if ($installed) {
+                            Write-Log "WinGet Store version installation/upgrade completed" -Level 'SUCCESS' -Section "WinGet Upgrade"
+                        }
                     } catch {
-                        Write-Warning "Could not open Microsoft Store for WinGet upgrade: $_"
-                        Write-Host "You can manually upgrade WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
+                        $script:WarningCount++
+                        Write-Log "Could not open Microsoft Store for WinGet upgrade" -Level 'WARNING' -Section "WinGet Upgrade" -Exception $_
+                        Write-Log "You can manually upgrade WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1" -Level 'INFO' -Section "WinGet Upgrade"
                     }
                 }
             } else {
