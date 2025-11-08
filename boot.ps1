@@ -1046,32 +1046,73 @@ else {
         $nPath = "NFS:/media"
         Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
         
+        # Check if NFS Client service is running
+        $nfsService = Get-Service -Name "NfsClnt" -ErrorAction SilentlyContinue
+        if ($nfsService) {
+            if ($nfsService.Status -ne "Running") {
+                Write-Log "NFS Client service is not running. Attempting to start it..." -Level 'WARNING' -Section "Network Drive Mapping"
+                try {
+                    Start-Service -Name "NfsClnt" -ErrorAction Stop
+                    Write-Log "NFS Client service started successfully" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                    Start-Sleep -Seconds 2
+                } catch {
+                    $script:WarningCount++
+                    Write-Log "Failed to start NFS Client service: $_" -Level 'WARNING' -Section "Network Drive Mapping"
+                }
+            } else {
+                Write-Log "NFS Client service is running" -Level 'INFO' -Section "Network Drive Mapping"
+            }
+        } else {
+            $script:WarningCount++
+            Write-Log "NFS Client service not found. NFS mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+        }
+        
         # Remove existing mapping if it exists
+        Write-Log "Removing any existing mapping for $nDrive..." -Level 'INFO' -Section "Network Drive Mapping"
         $deleteResult = net use $nDrive /delete /yes 2>&1
-        if ($LASTEXITCODE -eq 0 -or $deleteResult -match "not found" -or $deleteResult -match "not exist") {
-            Write-Log "Removed existing mapping for $nDrive (if it existed)" -Level 'INFO' -Section "Network Drive Mapping"
+        $deleteOutput = $deleteResult | Out-String
+        if ($LASTEXITCODE -eq 0 -or $deleteOutput -match "not found" -or $deleteOutput -match "not exist" -or $deleteOutput -match "not connected") {
+            Write-Log "Existing mapping removed or did not exist" -Level 'INFO' -Section "Network Drive Mapping"
+        } else {
+            Write-Log "Note: Could not remove existing mapping: $deleteOutput" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # Create persistent mapping
-        Write-Log "Creating NFS mapping..." -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Log "Creating NFS mapping to $nPath..." -Level 'INFO' -Section "Network Drive Mapping"
         $mapResult = net use $nDrive $nPath /persistent:yes 2>&1
+        $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
         
+        Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+        
         if ($mapExitCode -eq 0) {
+            # Wait a moment for the mapping to register
+            Start-Sleep -Seconds 2
+            
             # Verify the mapping actually works
             $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
             if ($testPath) {
                 Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded but drive is not accessible: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
-                Write-Log "Output: $($mapResult -join ' | ')" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Mapping command succeeded (exit code 0) but drive is not accessible: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "This may indicate the NFS server is not accessible or the path is incorrect" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                
+                # Check if drive shows up in net use list
+                $netUseList = net use 2>&1 | Out-String
+                if ($netUseList -match $nDrive) {
+                    Write-Log "Drive appears in net use list but is not accessible. May need to check NFS server connectivity." -Level 'WARNING' -Section "Network Drive Mapping"
+                } else {
+                    Write-Log "Drive does not appear in net use list. Mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
+                }
             }
         } else {
             $script:ErrorCount++
             Write-Log "Failed to map $nDrive to $nPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Error output: $($mapResult -join ' | ')" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Note: NFS mapping may require the NFS server to be accessible and NFS Client service to be running" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "Error output: $mapOutput" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Troubleshooting: Check that NFS server is accessible, NFS Client service is running, and path format is correct" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "NFS path format should be: NFS:/server/share or \\server\share" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # Map S: drive to \\FS-1\Storage (Windows Network)
@@ -1079,32 +1120,62 @@ else {
         $sPath = "\\FS-1\Storage"
         Write-Log "Attempting to map $sDrive to $sPath" -Level 'INFO' -Section "Network Drive Mapping"
         
+        # Test network connectivity to the server first
+        $serverName = ($sPath -split '\\')[2]
+        Write-Log "Testing connectivity to server: $serverName" -Level 'INFO' -Section "Network Drive Mapping"
+        $pingResult = Test-Connection -ComputerName $serverName -Count 1 -Quiet -ErrorAction SilentlyContinue
+        if ($pingResult) {
+            Write-Log "Server is reachable" -Level 'INFO' -Section "Network Drive Mapping"
+        } else {
+            $script:WarningCount++
+            Write-Log "Server $serverName may not be reachable. Mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+        }
+        
         # Remove existing mapping if it exists
+        Write-Log "Removing any existing mapping for $sDrive..." -Level 'INFO' -Section "Network Drive Mapping"
         $deleteResult = net use $sDrive /delete /yes 2>&1
-        if ($LASTEXITCODE -eq 0 -or $deleteResult -match "not found" -or $deleteResult -match "not exist") {
-            Write-Log "Removed existing mapping for $sDrive (if it existed)" -Level 'INFO' -Section "Network Drive Mapping"
+        $deleteOutput = $deleteResult | Out-String
+        if ($LASTEXITCODE -eq 0 -or $deleteOutput -match "not found" -or $deleteOutput -match "not exist" -or $deleteOutput -match "not connected") {
+            Write-Log "Existing mapping removed or did not exist" -Level 'INFO' -Section "Network Drive Mapping"
+        } else {
+            Write-Log "Note: Could not remove existing mapping: $deleteOutput" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # Create persistent mapping
-        Write-Log "Creating Windows network mapping..." -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
         $mapResult = net use $sDrive $sPath /persistent:yes 2>&1
+        $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
         
+        Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+        
         if ($mapExitCode -eq 0) {
+            # Wait a moment for the mapping to register
+            Start-Sleep -Seconds 2
+            
             # Verify the mapping actually works
             $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
             if ($testPath) {
                 Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded but drive is not accessible: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
-                Write-Log "Output: $($mapResult -join ' | ')" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Mapping command succeeded (exit code 0) but drive is not accessible: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "This may indicate authentication issues or the share is not accessible" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                
+                # Check if drive shows up in net use list
+                $netUseList = net use 2>&1 | Out-String
+                if ($netUseList -match $sDrive) {
+                    Write-Log "Drive appears in net use list but is not accessible. May need credentials or share permissions." -Level 'WARNING' -Section "Network Drive Mapping"
+                } else {
+                    Write-Log "Drive does not appear in net use list. Mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
+                }
             }
         } else {
             $script:ErrorCount++
             Write-Log "Failed to map $sDrive to $sPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Error output: $($mapResult -join ' | ')" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Note: Windows network mapping may require network connectivity and proper credentials" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "Error output: $mapOutput" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Troubleshooting: Check network connectivity, server availability, share permissions, and credentials" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # List all mapped drives for verification
