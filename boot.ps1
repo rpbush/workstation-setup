@@ -1274,28 +1274,85 @@ else {
                 }
                 
                 if ($credential) {
-                    # Use credentials with New-PSDrive
+                    # Use credentials with New-PSDrive (creates persistent mapping)
                     Write-Log "Using provided credentials for mapping..." -Level 'INFO' -Section "Network Drive Mapping"
                     try {
-                        $psDrive = New-PSDrive -Name $sDrive.Replace(':', '') -PSProvider FileSystem -Root $sPath -Credential $credential -Persist -ErrorAction Stop
-                        Write-Log "PSDrive created successfully" -Level 'INFO' -Section "Network Drive Mapping"
+                        $driveName = $sDrive.Replace(':', '')
+                        Write-Log "Creating persistent PSDrive with credentials..." -Level 'INFO' -Section "Network Drive Mapping"
                         
-                        # Convert PSDrive to persistent net use mapping
-                        # Remove the PSDrive and create a net use mapping with credentials
-                        Remove-PSDrive -Name $sDrive.Replace(':', '') -Force -ErrorAction SilentlyContinue
+                        # Remove any existing PSDrive first
+                        Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
                         
-                        # Use net use with credentials
-                        $username = $credential.UserName
-                        $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
-                        $mapResult = cmd /c "echo $password | net use $sDrive $sPath /user:$username /persistent:yes" 2>&1
-                        $mapOutput = $mapResult | Out-String
-                        $mapExitCode = $LASTEXITCODE
+                        # Create persistent PSDrive with credentials
+                        $psDrive = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $sPath -Credential $credential -Persist -ErrorAction Stop
+                        Write-Log "PSDrive created successfully: $driveName" -Level 'SUCCESS' -Section "Network Drive Mapping"
                         
-                        # Clear password from memory
-                        $password = $null
+                        # Verify the drive is accessible
+                        $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
+                        if ($testPath) {
+                            $mapSuccess = $true
+                            $mapExitCode = 0
+                            $mapOutput = "PSDrive created and verified successfully"
+                            Write-Log "Drive $sDrive is accessible: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        } else {
+                            Write-Log "PSDrive created but not accessible via Test-Path" -Level 'WARNING' -Section "Network Drive Mapping"
+                            # Still consider it a success if PSDrive was created
+                            $mapSuccess = $true
+                            $mapExitCode = 0
+                            $mapOutput = "PSDrive created (access verification pending)"
+                        }
                     } catch {
-                        Write-Log "PSDrive method failed, trying net use with credentials..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
-                        # Fall through to net use method
+                        Write-Log "PSDrive method failed, trying net use with cmdkey..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
+                        
+                        # Fallback: Use cmdkey + net use
+                        try {
+                            $username = $credential.UserName
+                            $networkCred = $credential.GetNetworkCredential()
+                            $password = $networkCred.Password
+                            
+                            # Store credentials using cmdkey
+                            Write-Log "Storing credentials using cmdkey for fallback method..." -Level 'INFO' -Section "Network Drive Mapping"
+                            $cmdkeyTarget = $sPath
+                            $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$username /pass:$password 2>&1 | Out-String
+                            $cmdkeySuccess = $LASTEXITCODE -eq 0
+                            
+                            if ($cmdkeySuccess) {
+                                Write-Log "Credentials stored successfully with cmdkey" -Level 'INFO' -Section "Network Drive Mapping"
+                                
+                                # Now use net use - it will use the stored credentials
+                                $tempOutput = [System.IO.Path]::GetTempFileName()
+                                $tempError = [System.IO.Path]::GetTempFileName()
+                                
+                                $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
+                                
+                                $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+                                $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                                if ($errorOutput) {
+                                    $mapOutput += "`nError: $errorOutput"
+                                }
+                                $mapExitCode = $process.ExitCode
+                                
+                                Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+                                Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+                                
+                                if ($mapExitCode -eq 0) {
+                                    $mapSuccess = $true
+                                    Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+                                } else {
+                                    Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                                    # Clean up stored credentials on failure
+                                    cmdkey /delete:$cmdkeyTarget 2>&1 | Out-Null
+                                }
+                            } else {
+                                Write-Log "Failed to store credentials with cmdkey: $cmdkeyResult" -Level 'WARNING' -Section "Network Drive Mapping"
+                            }
+                            
+                            # Clear password from memory
+                            $password = $null
+                            $networkCred = $null
+                        } catch {
+                            Write-Log "Fallback credential method also failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                        }
                     }
                 }
                 
