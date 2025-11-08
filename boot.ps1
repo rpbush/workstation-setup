@@ -176,6 +176,34 @@ function Test-AppxPackageInstalled {
     }
 }
 
+# Helper function to check if Windows is already activated
+function Test-WindowsActivated {
+    try {
+        # Check for permanently activated license (LicenseStatus = 1 means activated)
+        $activationStatus = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue | Where-Object { 
+            $_.PartialProductKey -and $_.LicenseStatus -eq 1 
+        } | Select-Object -First 1
+        
+        if ($activationStatus) {
+            return $true
+        }
+        
+        # Also check using slmgr for additional verification
+        $slmgrOutput = & cscript.exe //B //Nologo "$env:SystemRoot\System32\slmgr.vbs" /xpr 2>&1
+        $slmgrOutputString = $slmgrOutput -join "`n"
+        
+        # Check if output indicates permanent activation
+        if ($slmgrOutputString -match "permanently|permanent activation|digital license") {
+            return $true
+        }
+        
+        return $false
+    } catch {
+        # If we can't check, assume not activated to be safe
+        return $false
+    }
+}
+
 # Helper function to prompt user after opening Windows Store
 function Wait-ForStoreInstallation {
     param(
@@ -1586,45 +1614,216 @@ else {
     }
     Write-Host "Done: Installing Windows Terminal"
     # ---------------
-    # Activating Windows with HWID
-    Write-Host "Start: Windows HWID Activation"
-    $scriptDir = Split-Path $mypath -Parent
-    $masAioPath = Join-Path $scriptDir "MAS_AIO.cmd"
-    
-    # If MAS_AIO.cmd not found locally, try downloading from GitHub
-    if (-not (Test-Path $masAioPath)) {
-        Write-Host "MAS_AIO.cmd not found locally, attempting to download from GitHub..."
-        try {
-            $masAioUrl = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/MAS_AIO.cmd"
-            # Download the file
-            $response = Invoke-WebRequest -Uri $masAioUrl -ErrorAction Stop
-            
-            # Convert LF to CRLF and ensure newline at end (fixes line ending issues)
-            $content = $response.Content
-            # Replace LF with CRLF (but not if already CRLF)
-            if ($content -notmatch "`r`n") {
-                $content = $content -replace "`n", "`r`n"
-            }
-            # Ensure file ends with newline
-            if ($content -notmatch "`r?`n$") {
-                $content += "`r`n"
-            }
-            
-            # Write with UTF-8 encoding (no BOM) and CRLF line endings
-            [System.IO.File]::WriteAllText($masAioPath, $content, [System.Text.Encoding]::UTF8)
-            Write-Host "Successfully downloaded MAS_AIO.cmd from GitHub"
-        } catch {
-            Write-Warning "Failed to download MAS_AIO.cmd from GitHub: $_"
-            Write-Warning "Windows activation will be skipped. You can download MAS_AIO.cmd manually if needed."
+    # Activating Windows with HWID (integrated - no external file needed)
+    Start-Section "Windows HWID Activation"
+    try {
+        Write-Log "Checking Windows activation status..." -Level 'INFO' -Section "Windows HWID Activation"
+        
+        # Check if Windows is already permanently activated using helper function
+        if (Test-WindowsActivated) {
+            Write-Log "Windows is already permanently activated - skipping activation" -Level 'SUCCESS' -Section "Windows HWID Activation"
+            End-Section "Windows HWID Activation"
+            return
         }
+        
+        Write-Log "Windows is not activated, proceeding with HWID activation..." -Level 'INFO' -Section "Windows HWID Activation"
+        
+        try {
+            # Check Windows version/build
+            $osInfo = Get-CimInstance -ClassName Win32_OperatingSystem
+            $buildNumber = [int]$osInfo.BuildNumber
+            $edition = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name EditionID).EditionID
+            
+            Write-Log "Windows Edition: $edition, Build: $buildNumber" -Level 'INFO' -Section "Windows HWID Activation"
+            
+            # HWID activation is only supported on Windows 10/11 (build 10240+)
+            if ($buildNumber -lt 10240) {
+                Write-Log "HWID activation is only supported on Windows 10/11 (build 10240+). Current build: $buildNumber" -Level 'WARNING' -Section "Windows HWID Activation"
+                End-Section "Windows HWID Activation"
+                return
+            }
+            
+            # Check if it's Windows Server (not supported)
+            if (Test-Path "$env:SystemRoot\Servicing\Packages\Microsoft-Windows-Server*Edition~*.mum") {
+                Write-Log "HWID activation is not supported on Windows Server" -Level 'WARNING' -Section "Windows HWID Activation"
+                End-Section "Windows HWID Activation"
+                return
+            }
+            
+            # Check internet connection
+            $internetConnected = $false
+            try {
+                $testConnection = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction Stop
+                if ($testConnection) {
+                    $internetConnected = $true
+                }
+            } catch {
+                # Try alternative method
+                try {
+                    $webClient = New-Object System.Net.NetworkInformation.Ping
+                    $result = $webClient.Send("8.8.8.8", 1000)
+                    $internetConnected = ($result.Status -eq 'Success')
+                } catch {
+                    $internetConnected = $false
+                }
+            }
+            
+            if (-not $internetConnected) {
+                Write-Log "Internet connection required for HWID activation. Skipping activation." -Level 'WARNING' -Section "Windows HWID Activation"
+                End-Section "Windows HWID Activation"
+                return
+            }
+            
+            Write-Log "Internet connection verified" -Level 'INFO' -Section "Windows HWID Activation"
+            
+            # Generic product keys for Windows 10/11 editions (for installation/upgrade purposes)
+            # These are publicly available generic keys that allow installation and activation via digital license
+            $genericKeys = @{
+                'Windows 10 Home' = 'TX9XD-98N7V-6WMQ6-BX7FG-H8Q99'
+                'Windows 10 Home N' = '3KHY7-WNT83-DGQKR-F7HPR-844BM'
+                'Windows 10 Home Single Language' = '7HNRX-D7KGG-3K4RQ-4WPJ4-YTDFH'
+                'Windows 10 Home Country Specific' = 'PVMJN-6DFY6-9CCP6-7BKTT-D3WVR'
+                'Windows 10 Professional' = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
+                'Windows 10 Professional N' = 'MH37W-N47XK-V7XM9-C7227-GCQG9'
+                'Windows 10 Professional Education' = '6TP4R-GNPTD-KYYHQ-7B7DP-J447Y'
+                'Windows 10 Professional Education N' = 'YVWGF-BXNMC-HTQYQ-CPQ99-66QFC'
+                'Windows 10 Professional Workstation' = 'NRG8B-VKK3Q-CXVCJ-9G2XF-6Q84J'
+                'Windows 10 Professional Workstation N' = '9FNHH-K3HBT-3W4TD-6383H-6XYWF'
+                'Windows 10 Education' = 'NW6C2-QMPVW-D7KKK-3GKT6-VCFB2'
+                'Windows 10 Education N' = '2WH4N-8QGBV-H22JP-CT43Q-MDWWJ'
+                'Windows 10 Enterprise' = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
+                'Windows 10 Enterprise N' = 'DPH2V-TTNVB-4X9Q3-TJR4H-KHJW4'
+                'Windows 10 Enterprise G' = 'YYVX9-NTFWV-6MDM3-9PT4T-4M68B'
+                'Windows 10 Enterprise G N' = '44RPN-FTY23-9VTTB-MP9BX-T84FV'
+                'Windows 10 Enterprise LTSB 2015' = 'WNMTR-4C88C-JK8YV-HQ7T2-76DF9'
+                'Windows 10 Enterprise LTSB 2016' = 'DCPHK-NFMTC-H88MJ-PFHPY-QJ4BJ'
+                'Windows 10 Enterprise LTSC 2019' = 'M7XTQ-FN8P6-TTKYV-9D4CC-J462D'
+                'Windows 10 Enterprise LTSC 2021' = 'M7XTQ-FN8P6-TTKYV-9D4CC-J462D'
+                'Windows 11 Home' = 'TX9XD-98N7V-6WMQ6-BX7FG-H8Q99'
+                'Windows 11 Home N' = '3KHY7-WNT83-DGQKR-F7HPR-844BM'
+                'Windows 11 Home Single Language' = '7HNRX-D7KGG-3K4RQ-4WPJ4-YTDFH'
+                'Windows 11 Home Country Specific' = 'PVMJN-6DFY6-9CCP6-7BKTT-D3WVR'
+                'Windows 11 Professional' = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
+                'Windows 11 Professional N' = 'MH37W-N47XK-V7XM9-C7227-GCQG9'
+                'Windows 11 Professional Education' = '6TP4R-GNPTD-KYYHQ-7B7DP-J447Y'
+                'Windows 11 Professional Education N' = 'YVWGF-BXNMC-HTQYQ-CPQ99-66QFC'
+                'Windows 11 Professional Workstation' = 'NRG8B-VKK3Q-CXVCJ-9G2XF-6Q84J'
+                'Windows 11 Professional Workstation N' = '9FNHH-K3HBT-3W4TD-6383H-6XYWF'
+                'Windows 11 Education' = 'NW6C2-QMPVW-D7KKK-3GKT6-VCFB2'
+                'Windows 11 Education N' = '2WH4N-8QGBV-H22JP-CT43Q-MDWWJ'
+                'Windows 11 Enterprise' = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
+                'Windows 11 Enterprise N' = 'DPH2V-TTNVB-4X9Q3-TJR4H-KHJW4'
+                'Windows 11 Enterprise G' = 'YYVX9-NTFWV-6MDM3-9PT4T-4M68B'
+                'Windows 11 Enterprise G N' = '44RPN-FTY23-9VTTB-MP9BX-T84FV'
+            }
+            
+            # Map edition ID to key name
+            $editionKeyMap = @{
+                'Core' = 'Windows 10 Home'
+                'CoreN' = 'Windows 10 Home N'
+                'CoreSingleLanguage' = 'Windows 10 Home Single Language'
+                'CoreCountrySpecific' = 'Windows 10 Home Country Specific'
+                'Professional' = 'Windows 10 Professional'
+                'ProfessionalN' = 'Windows 10 Professional N'
+                'ProfessionalEducation' = 'Windows 10 Professional Education'
+                'ProfessionalEducationN' = 'Windows 10 Professional Education N'
+                'ProfessionalWorkstation' = 'Windows 10 Professional Workstation'
+                'ProfessionalWorkstationN' = 'Windows 10 Professional Workstation N'
+                'Education' = 'Windows 10 Education'
+                'EducationN' = 'Windows 10 Education N'
+                'Enterprise' = 'Windows 10 Enterprise'
+                'EnterpriseN' = 'Windows 10 Enterprise N'
+                'EnterpriseG' = 'Windows 10 Enterprise G'
+                'EnterpriseGN' = 'Windows 10 Enterprise G N'
+                'EnterpriseS' = 'Windows 10 Enterprise'
+                'EnterpriseSN' = 'Windows 10 Enterprise N'
+            }
+            
+            # For Windows 11, use same mapping but with Windows 11 keys
+            if ($buildNumber -ge 22000) {
+                $editionKeyMap = @{
+                    'Core' = 'Windows 11 Home'
+                    'CoreN' = 'Windows 11 Home N'
+                    'CoreSingleLanguage' = 'Windows 11 Home Single Language'
+                    'CoreCountrySpecific' = 'Windows 11 Home Country Specific'
+                    'Professional' = 'Windows 11 Professional'
+                    'ProfessionalN' = 'Windows 11 Professional N'
+                    'ProfessionalEducation' = 'Windows 11 Professional Education'
+                    'ProfessionalEducationN' = 'Windows 11 Professional Education N'
+                    'ProfessionalWorkstation' = 'Windows 11 Professional Workstation'
+                    'ProfessionalWorkstationN' = 'Windows 11 Professional Workstation N'
+                    'Education' = 'Windows 11 Education'
+                    'EducationN' = 'Windows 11 Education N'
+                    'Enterprise' = 'Windows 11 Enterprise'
+                    'EnterpriseN' = 'Windows 11 Enterprise N'
+                    'EnterpriseG' = 'Windows 11 Enterprise G'
+                    'EnterpriseGN' = 'Windows 11 Enterprise G N'
+                    'EnterpriseS' = 'Windows 11 Enterprise'
+                    'EnterpriseSN' = 'Windows 11 Enterprise N'
+                }
+            }
+            
+            # Get the appropriate generic key
+            $keyName = $editionKeyMap[$edition]
+            if (-not $keyName) {
+                Write-Log "Edition '$edition' not supported for HWID activation" -Level 'WARNING' -Section "Windows HWID Activation"
+                End-Section "Windows HWID Activation"
+                return
+            }
+            
+            $genericKey = $genericKeys[$keyName]
+            if (-not $genericKey) {
+                Write-Log "No generic key found for edition: $keyName" -Level 'WARNING' -Section "Windows HWID Activation"
+                End-Section "Windows HWID Activation"
+                return
+            }
+            
+            Write-Log "Installing generic product key for $keyName..." -Level 'INFO' -Section "Windows HWID Activation"
+            
+            # Install the generic product key using slmgr
+            $installKeyResult = & cscript.exe //B //Nologo "$env:SystemRoot\System32\slmgr.vbs" /ipk $genericKey 2>&1
+            $installKeyOutput = $installKeyResult -join "`n"
+            
+            if ($installKeyOutput -match "successfully|installed") {
+                Write-Log "Product key installed successfully" -Level 'SUCCESS' -Section "Windows HWID Activation"
+            } else {
+                Write-Log "Product key installation output: $installKeyOutput" -Level 'INFO' -Section "Windows HWID Activation"
+            }
+            
+            # Activate Windows using slmgr /ato (activates online)
+            Write-Log "Activating Windows online..." -Level 'INFO' -Section "Windows HWID Activation"
+            $activateResult = & cscript.exe //B //Nologo "$env:SystemRoot\System32\slmgr.vbs" /ato 2>&1
+            $activateOutput = $activateResult -join "`n"
+            
+            Write-Log "Activation output: $activateOutput" -Level 'INFO' -Section "Windows HWID Activation"
+            
+            # Wait a moment for activation to process
+            Start-Sleep -Seconds 5
+            
+            # Check activation status
+            $finalStatus = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { 
+                $_.PartialProductKey -and $_.LicenseStatus -eq 1 
+            } | Select-Object -First 1
+            
+            # Wait a bit more and check activation status again
+            Start-Sleep -Seconds 3
+            
+            # Final verification using helper function
+            if (Test-WindowsActivated) {
+                Write-Log "Windows successfully activated with digital license" -Level 'SUCCESS' -Section "Windows HWID Activation"
+            } else {
+                Write-Log "Activation may still be processing. Please check activation status manually." -Level 'INFO' -Section "Windows HWID Activation"
+                Write-Log "You can check activation status with: slmgr /xpr" -Level 'INFO' -Section "Windows HWID Activation"
+            }
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Error during Windows HWID activation" -Level 'ERROR' -Section "Windows HWID Activation" -Exception $_
+        }
+    } catch {
+        $script:ErrorCount++
+        Write-Log "Error during Windows HWID activation check" -Level 'ERROR' -Section "Windows HWID Activation" -Exception $_
     }
-    
-    if (Test-Path $masAioPath) {
-        & cmd.exe /c "`"$masAioPath`" /HWID"
-        Write-Host "Done: Windows HWID Activation"
-    } else {
-        Write-Warning "MAS_AIO.cmd not available. Windows activation skipped."
-    }
+    End-Section "Windows HWID Activation"
     # ---------------
     # Installing office workload
     Write-Host "Start: Office install"
@@ -1880,63 +2079,165 @@ else {
         Write-Log "DSC file contains packages: Git, PowerShell 7, PowerToys, Signal, Steam, 7zip, Notepad++, GitHub CLI, Cursor, Windows Terminal, and more..." -Level 'INFO' -Section "Dev Flows Installation"
         $configStart = Get-Date
         
-        # Run winget configuration with output streaming to see progress
+        # Run winget configuration with real-time output streaming
         $outputFile = "C:\temp\winget-config-output-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
         $errorFile = "C:\temp\winget-config-error-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
-        
-        $process = Start-Process -FilePath "winget" -ArgumentList "configuration", "-f", $dscAdmin, "--accept-configuration-agreements" -NoNewWindow -PassThru -RedirectStandardOutput $outputFile -RedirectStandardError $errorFile -Wait
-        
-        # Read the output files
         $configOutput = @()
-        if (Test-Path $outputFile) {
-            $configOutput += Get-Content $outputFile -ErrorAction SilentlyContinue
-            Write-Log "Standard output file: $outputFile" -Level 'INFO' -Section "Dev Flows Installation"
-        }
-        if (Test-Path $errorFile) {
-            $errorOutput = Get-Content $errorFile -ErrorAction SilentlyContinue
-            if ($errorOutput.Count -gt 0) {
-                $configOutput += $errorOutput
-                Write-Log "Error output file: $errorFile" -Level 'INFO' -Section "Dev Flows Installation"
+        $script:currentPackage = $null
+        $script:packageStartTime = $null
+        
+        # Create process info for real-time output capture
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "winget"
+        $psi.Arguments = "configuration -f `"$dscAdmin`" --accept-configuration-agreements"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        
+        # Set up event handlers for real-time output using script scope
+        $outputBuilder = New-Object System.Text.StringBuilder
+        $errorBuilder = New-Object System.Text.StringBuilder
+        
+        # Register output data received event with script scope access
+        $scriptBlockOutput = {
+            param($sender, $e)
+            if (-not [string]::IsNullOrWhiteSpace($e.Data)) {
+                $line = $e.Data
+                $null = $script:outputBuilder.AppendLine($line)
+                $script:configOutput += $line
+                
+                # Parse output to identify package installations
+                # Look for patterns like: "Installing [PackageName]", "Found [PackageName]", "Successfully installed", etc.
+                if ($line -match 'Installing\s+([^\s]+|"[^"]+")' -or $line -match 'Found\s+([^\s]+|"[^"]+")') {
+                    $packageName = if ($matches[1] -match '^"(.+)"$') { $matches[1] } else { $matches[1] }
+                    if ($packageName -and $packageName -ne $script:currentPackage) {
+                        if ($script:currentPackage) {
+                            $packageDuration = (Get-Date) - $script:packageStartTime
+                            Write-Log "Completed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
+                        }
+                        $script:currentPackage = $packageName
+                        $script:packageStartTime = Get-Date
+                        Write-Log "Installing: $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
+                    }
+                } elseif ($line -match 'Successfully\s+installed|Installation\s+completed|Package\s+installed' -and $script:currentPackage) {
+                    $packageDuration = (Get-Date) - $script:packageStartTime
+                    Write-Log "Successfully installed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    $script:currentPackage = $null
+                } elseif ($line -match 'Skipping|Already\s+installed|No\s+change' -and $script:currentPackage) {
+                    Write-Log "Skipped (already installed): $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
+                    $script:currentPackage = $null
+                } elseif ($line -match 'Error|Failed|Exception' -and $script:currentPackage) {
+                    Write-Log "Failed: $script:currentPackage - $line" -Level 'ERROR' -Section "Dev Flows Installation"
+                    $script:currentPackage = $null
+                } elseif ($line -match 'Processing\s+([^\s]+|"[^"]+")|Applying\s+([^\s]+|"[^"]+")') {
+                    # Try to extract package ID from processing/applying messages
+                    $packageId = if ($matches[1]) { 
+                        if ($matches[1] -match '^"(.+)"$') { $matches[1] } else { $matches[1] }
+                    } elseif ($matches[2]) {
+                        if ($matches[2] -match '^"(.+)"$') { $matches[2] } else { $matches[2] }
+                    }
+                    if ($packageId -and $packageId -ne $script:currentPackage) {
+                        if ($script:currentPackage) {
+                            $packageDuration = (Get-Date) - $script:packageStartTime
+                            Write-Log "Completed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
+                        }
+                        $script:currentPackage = $packageId
+                        $script:packageStartTime = Get-Date
+                        Write-Log "Processing package: $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
+                    }
+                }
+                
+                # Also log important progress lines in real-time
+                if ($line -match 'Configuration\s+unit|Applying|Validating|Progress|Unit\s+\[') {
+                    Write-Log "Progress: $line" -Level 'INFO' -Section "Dev Flows Installation"
+                }
             }
+        }
+        
+        $scriptBlockError = {
+            param($sender, $e)
+            if (-not [string]::IsNullOrWhiteSpace($e.Data)) {
+                $line = $e.Data
+                $null = $script:errorBuilder.AppendLine($line)
+                $script:configOutput += $line
+                Write-Log "Error output: $line" -Level 'ERROR' -Section "Dev Flows Installation"
+            }
+        }
+        
+        # Store references in script scope for event handlers
+        $script:outputBuilder = $outputBuilder
+        $script:errorBuilder = $errorBuilder
+        $script:configOutput = $configOutput
+        
+        Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $scriptBlockOutput | Out-Null
+        Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $scriptBlockError | Out-Null
+        
+        # Start the process
+        Write-Log "Starting winget configuration process..." -Level 'INFO' -Section "Dev Flows Installation"
+        $process.Start() | Out-Null
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+        
+        # Wait for process to complete with timeout (30 minutes max)
+        $timeoutMinutes = 30
+        $timeout = (Get-Date).AddMinutes($timeoutMinutes)
+        $processCompleted = $false
+        
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 500
+            if ((Get-Date) -gt $timeout) {
+                Write-Log "winget configuration process exceeded timeout of $timeoutMinutes minutes. Terminating..." -Level 'ERROR' -Section "Dev Flows Installation"
+                $process.Kill()
+                $processCompleted = $false
+                break
+            }
+        }
+        
+        if ($process.HasExited) {
+            $processCompleted = $true
+            # Wait a bit more for async output to finish
+            Start-Sleep -Seconds 2
+        }
+        
+        # Clean up event handlers
+        Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
+        
+        # Save output to files
+        try {
+            $script:outputBuilder.ToString() | Out-File -FilePath $outputFile -Encoding UTF8
+            $script:errorBuilder.ToString() | Out-File -FilePath $errorFile -Encoding UTF8
+        } catch {
+            Write-Log "Warning: Could not save output files" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
         }
         
         $configDuration = (Get-Date) - $configStart
         $exitCode = $process.ExitCode
         
-        Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
-        
-        # Log full output (important for debugging)
-        if ($configOutput.Count -gt 0) {
-            Write-Log "Full configuration output ($($configOutput.Count) lines):" -Level 'INFO' -Section "Dev Flows Installation"
-            # Log in chunks to avoid overwhelming the log
-            $chunkSize = 50
-            for ($i = 0; $i -lt $configOutput.Count; $i += $chunkSize) {
-                $chunk = $configOutput[$i..([Math]::Min($i + $chunkSize - 1, $configOutput.Count - 1))]
-                Write-Log "Lines $($i+1)-$([Math]::Min($i + $chunkSize, $configOutput.Count)): $($chunk -join ' | ')" -Level 'INFO' -Section "Dev Flows Installation"
-            }
-        } else {
-            Write-Log "No output captured from winget configuration" -Level 'WARNING' -Section "Dev Flows Installation"
+        if ($script:currentPackage) {
+            $packageDuration = (Get-Date) - $script:packageStartTime
+            Write-Log "Final package status: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
         }
+        
+        Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
         
         if ($exitCode -eq 0) {
             Write-Log "Dev flows DSC configuration completed successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
-            
-            # Check if any packages were actually installed by looking for installation messages in output
-            $installMessages = $configOutput | Where-Object { $_ -match "installed|Installing|Successfully" }
-            if ($installMessages.Count -gt 0) {
-                Write-Log "Installation activity detected. Packages processed: $($installMessages.Count) messages" -Level 'INFO' -Section "Dev Flows Installation"
-                foreach ($msg in $installMessages) {
-                    Write-Log "  - $msg" -Level 'INFO' -Section "Dev Flows Installation"
-                }
-            } else {
-                Write-Log "No installation activity detected in output. Packages may already be installed or configuration may have been skipped." -Level 'WARNING' -Section "Dev Flows Installation"
-            }
         } else {
             $script:ErrorCount++
             Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
         }
         
-        # Keep output files for debugging (user can delete them later)
+        # Log summary of packages processed
+        $packageCount = ($script:configOutput | Where-Object { $_ -match 'Installing|Processing package|Successfully installed' }).Count
+        if ($packageCount -gt 0) {
+            Write-Log "Total packages processed: $packageCount" -Level 'INFO' -Section "Dev Flows Installation"
+        }
+        
+        # Keep output files for debugging
         Write-Log "Output files saved for debugging: $outputFile, $errorFile" -Level 'INFO' -Section "Dev Flows Installation"
         
     } catch {
