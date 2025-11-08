@@ -34,13 +34,32 @@ function Write-Log {
     
     # Add exception details if provided
     if ($Exception) {
-        $logEntry += " | Exception: $($Exception.GetType().FullName)"
-        $logEntry += " | Message: $($Exception.Message)"
-        if ($Exception.StackTrace) {
-            $logEntry += " | StackTrace: $($Exception.StackTrace -replace "`r?`n", " | ")"
-        }
-        if ($Exception.InnerException) {
-            $logEntry += " | InnerException: $($Exception.InnerException.Message)"
+        # Handle both Exception objects and ErrorRecord objects
+        if ($Exception -is [System.Management.Automation.ErrorRecord]) {
+            $actualException = $Exception.Exception
+            $logEntry += " | ErrorRecord: $($Exception.GetType().FullName)"
+            $logEntry += " | Exception: $($actualException.GetType().FullName)"
+            $logEntry += " | Message: $($Exception.Exception.Message)"
+            if ($Exception.Exception.StackTrace) {
+                $logEntry += " | StackTrace: $($Exception.Exception.StackTrace -replace "`r?`n", " | ")"
+            }
+            if ($Exception.Exception.InnerException) {
+                $logEntry += " | InnerException: $($Exception.Exception.InnerException.Message)"
+            }
+            # Also include the ErrorRecord's error message which may have more details
+            if ($Exception.ToString() -ne $Exception.Exception.Message) {
+                $logEntry += " | ErrorRecord: $($Exception.ToString() -replace "`r?`n", " | ")"
+            }
+        } else {
+            # It's already an Exception object
+            $logEntry += " | Exception: $($Exception.GetType().FullName)"
+            $logEntry += " | Message: $($Exception.Message)"
+            if ($Exception.StackTrace) {
+                $logEntry += " | StackTrace: $($Exception.StackTrace -replace "`r?`n", " | ")"
+            }
+            if ($Exception.InnerException) {
+                $logEntry += " | InnerException: $($Exception.InnerException.Message)"
+            }
         }
     }
     
@@ -602,11 +621,20 @@ else {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-$dscUri = "https://raw.githubusercontent.com/rpbush/New_Computer_Setup/main/"
+# Try to use local DSC files first, then fall back to GitHub
+$scriptDir = Split-Path $mypath -Parent
 $dscNonAdmin = "rpbush.nonAdmin.dsc.yml";
 $dscAdmin = "rpbush.dev.dsc.yml";
 $dscOffice = "rpbush.office.dsc.yml";
 $dscPowerToysEnterprise = "Z:\source\powertoys\.configurations\configuration.vsEnterprise.dsc.yaml";
+
+# Check if DSC files exist locally
+$dscNonAdminLocal = Join-Path $scriptDir $dscNonAdmin
+$dscAdminLocal = Join-Path $scriptDir $dscAdmin
+$dscOfficeLocal = Join-Path $scriptDir $dscOffice
+
+# GitHub repository for DSC files (use workstation-setup repo which contains the files)
+$dscUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/"
 
 $dscOfficeUri = $dscUri + $dscOffice;
 $dscNonAdminUri = $dscUri + $dscNonAdmin 
@@ -619,17 +647,25 @@ if (!$isAdmin) {
 
    Start-Section "NonAdmin DSC Installation"
    $nonAdminDscDownloaded = $false
-   try {
-       Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
-       $downloadStart = Get-Date
-       Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
-       $downloadDuration = (Get-Date) - $downloadStart
-       Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+   
+   # Check if file exists locally first
+   if (Test-Path $dscNonAdminLocal) {
+       Write-Log "Using local NonAdmin DSC file: $dscNonAdminLocal" -Level 'INFO' -Section "NonAdmin DSC Installation"
+       Copy-Item $dscNonAdminLocal $dscNonAdmin -Force
        $nonAdminDscDownloaded = $true
-   } catch {
-       $script:ErrorCount++
-       Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
-       Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+   } else {
+       try {
+           Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
+           $downloadStart = Get-Date
+           Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
+           $downloadDuration = (Get-Date) - $downloadStart
+           Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+           $nonAdminDscDownloaded = $true
+       } catch {
+           $script:ErrorCount++
+           Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
+           Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+       }
    }
    
    if ($nonAdminDscDownloaded) {
@@ -1115,17 +1151,25 @@ else {
 
     Start-Section "Office Installation"
     $officeDscDownloaded = $false
-    try {
-        Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
-        $downloadStart = Get-Date
-        Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
-        $downloadDuration = (Get-Date) - $downloadStart
-        Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+    
+    # Check if file exists locally first
+    if (Test-Path $dscOfficeLocal) {
+        Write-Log "Using local Office DSC file: $dscOfficeLocal" -Level 'INFO' -Section "Office Installation"
+        Copy-Item $dscOfficeLocal $dscOffice -Force
         $officeDscDownloaded = $true
-    } catch {
-        $script:ErrorCount++
-        Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
-        Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
+    } else {
+        try {
+            Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
+            $downloadStart = Get-Date
+            Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+            $downloadDuration = (Get-Date) - $downloadStart
+            Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+            $officeDscDownloaded = $true
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+            Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
+        }
     }
     
     if ($officeDscDownloaded) {
@@ -1181,18 +1225,24 @@ else {
     
     if ($secondDriveExists) {
         Write-Host "Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation from C: drive."
-        Write-Log "Downloading Dev flows DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
-        try {
-            $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
-            $downloadDuration = (Get-Date) - $downloadStart
-            Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-            End-Section "Dev Flows Installation"
-            return
+        # Check if file exists locally first
+        if (Test-Path $dscAdminLocal) {
+            Write-Log "Using local Dev flows DSC file: $dscAdminLocal" -Level 'INFO' -Section "Dev Flows Installation"
+            Copy-Item $dscAdminLocal $dscAdmin -Force
+        } else {
+            try {
+                Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
+                $downloadStart = Get-Date
+                Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+                $downloadDuration = (Get-Date) - $downloadStart
+                Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+                End-Section "Dev Flows Installation"
+                return
+            }
         }
         
         # Remove Dev Drive resource from DSC file if it exists
@@ -1250,18 +1300,25 @@ else {
         }
     } else {
         Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
-        try {
-            Write-Log "Downloading Dev flows DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
-            $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
-            $downloadDuration = (Get-Date) - $downloadStart
-            Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-            End-Section "Dev Flows Installation"
-            return
+        
+        # Check if file exists locally first
+        if (Test-Path $dscAdminLocal) {
+            Write-Log "Using local Dev flows DSC file: $dscAdminLocal" -Level 'INFO' -Section "Dev Flows Installation"
+            Copy-Item $dscAdminLocal $dscAdmin -Force
+        } else {
+            try {
+                Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
+                $downloadStart = Get-Date
+                Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+                $downloadDuration = (Get-Date) - $downloadStart
+                Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+                End-Section "Dev Flows Installation"
+                return
+            }
         }
     }
     
