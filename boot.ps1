@@ -526,29 +526,30 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
    # Download dependencies (only if there are any to download)
    if ($uris.Count -gt 0) {
        for ($i = 0; $i -lt $uris.Length; $i++) {
-       $filePath = $paths[$i]
-       $fileUri = $uris[$i]
-       $fileName = $fileNames[$i]
-       Write-Host "Downloading: $fileName from $fileUri"
-       try {
-           if (Test-Path $filePath) {
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-           }
-           Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
-           
-           # Validate downloaded file
-           $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
-           if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
-               Write-Warning "$fileName download appears invalid, will retry or skip"
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+           $filePath = $paths[$i]
+           $fileUri = $uris[$i]
+           $fileName = $fileNames[$i]
+           Write-Host "Downloading: $fileName from $fileUri"
+           try {
+               if (Test-Path $filePath) {
+                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+               }
+               Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
+               
+               # Validate downloaded file
+               $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
+               if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
+                   Write-Warning "$fileName download appears invalid, will retry or skip"
+                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+                   $paths[$i] = $null
+               }
+           } catch {
+               Write-Warning "Failed to download $fileName : $_"
+               if (Test-Path $filePath) {
+                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+               }
                $paths[$i] = $null
            }
-       } catch {
-           Write-Warning "Failed to download $fileName : $_"
-           if (Test-Path $filePath) {
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-           }
-           $paths[$i] = $null
        }
    } else {
        Write-Log "All dependencies already installed. Skipping download." -Level 'INFO' -Section "WinGet Bootstrap"
