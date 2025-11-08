@@ -156,12 +156,21 @@ function Test-SoftwareInstalled {
 function Test-AppxPackageInstalled {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$PackageName
+        [string]$PackageName,
+        [Parameter(Mandatory=$false)]
+        [switch]$UseWildcard
     )
     
     try {
-        $package = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
-        return ($null -ne $package)
+        if ($UseWildcard) {
+            # Use wildcard matching for packages with versioned names (e.g., Microsoft.WindowsAppRuntime.1.8)
+            $package = Get-AppxPackage -Name "$PackageName*" -ErrorAction SilentlyContinue
+            return ($null -ne $package -and $package.Count -gt 0)
+        } else {
+            # Exact name matching
+            $package = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
+            return ($null -ne $package)
+        }
     } catch {
         return $false
     }
@@ -173,7 +182,9 @@ function Wait-ForStoreInstallation {
         [Parameter(Mandatory=$true)]
         [string]$AppName,
         [Parameter(Mandatory=$false)]
-        [string]$PackageName = $null
+        [string]$PackageName = $null,
+        [Parameter(Mandatory=$false)]
+        [switch]$UseWildcard
     )
     
     Write-Host ""
@@ -199,7 +210,12 @@ function Wait-ForStoreInstallation {
     # If package name provided, verify installation
     if ($PackageName) {
         Start-Sleep -Seconds 2
-        if (Test-AppxPackageInstalled -PackageName $PackageName) {
+        if ($UseWildcard) {
+            $installed = Test-AppxPackageInstalled -PackageName $PackageName -UseWildcard
+        } else {
+            $installed = Test-AppxPackageInstalled -PackageName $PackageName
+        }
+        if ($installed) {
             Write-Log "$AppName installation verified successfully" -Level 'SUCCESS' -Section "Store Installation"
             return $true
         } else {
@@ -435,8 +451,19 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
        return $true
    }
    
-   # Check if Windows App Runtime is already installed
-   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+   # Check if Windows App Runtime is already installed (package names are versioned like Microsoft.WindowsAppRuntime.1.8)
+   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
+   
+   if ($appRuntimeInstalled) {
+       # Get the actual installed version for logging
+       $runtimePackages = Get-AppxPackage -Name "Microsoft.WindowsAppRuntime*" -ErrorAction SilentlyContinue
+       if ($runtimePackages) {
+           $latestVersion = $runtimePackages | Sort-Object Version -Descending | Select-Object -First 1
+           Write-Log "Windows App Runtime is already installed (Version: $($latestVersion.Version), Package: $($latestVersion.Name))" -Level 'INFO' -Section "WinGet Bootstrap"
+       } else {
+           Write-Log "Windows App Runtime is already installed" -Level 'INFO' -Section "WinGet Bootstrap"
+       }
+   }
    
    if (-not $appRuntimeInstalled) {
        Write-Host "Windows App Runtime not found, attempting to install..."
@@ -460,10 +487,10 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
                Start-Process "ms-windows-store://pdp/?ProductId=9P7KNL5RWT25" -ErrorAction Stop
                Start-Sleep -Seconds 2  # Give Store time to open
                
-               $installed = Wait-ForStoreInstallation -AppName "Windows App Runtime" -PackageName "Microsoft.WindowsAppRuntime"
+               $installed = Wait-ForStoreInstallation -AppName "Windows App Runtime" -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
                if ($installed) {
-                   # Check if it got installed
-                   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+                   # Check if it got installed (use wildcard to match versioned package names)
+                   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
                    if ($appRuntimeInstalled) {
                        Write-Log "Windows App Runtime installed via Microsoft Store" -Level 'SUCCESS' -Section "WinGet Bootstrap"
                    }
@@ -662,7 +689,7 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
            winget install --id Microsoft.WindowsAppRuntime -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
            if ($LASTEXITCODE -eq 0) {
                Start-Sleep -Seconds 3
-               $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime"
+               $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
                if ($appRuntimeInstalled) {
                    Write-Host "Windows App Runtime installed successfully via winget"
                }
