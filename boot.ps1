@@ -1246,7 +1246,17 @@ else {
         }
         
         # Remove Dev Drive resource from DSC file if it exists
-        $dscLines = Get-Content $dscAdmin
+        Write-Log "Processing Dev flows DSC file to remove Dev Drive resource (if needed)..." -Level 'INFO' -Section "Dev Flows Installation"
+        try {
+            $dscLines = Get-Content $dscAdmin -ErrorAction Stop
+            Write-Log "DSC file loaded successfully ($($dscLines.Count) lines)" -Level 'INFO' -Section "Dev Flows Installation"
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to read DSC file: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            End-Section "Dev Flows Installation"
+            return
+        }
+        
         $newDscContent = @()
         $skipDevDrive = $false
         $devDriveIndent = 0
@@ -1292,11 +1302,16 @@ else {
         }
         
         if ($newDscContent.Count -lt $dscLines.Count) {
-            Write-Host "Removing Dev Drive resource from DSC configuration..."
-            Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n")
-            Write-Host "Dev Drive resource removed from configuration"
+            Write-Log "Removing Dev Drive resource from DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
+            try {
+                Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n") -ErrorAction Stop
+                Write-Log "Dev Drive resource removed from configuration (removed $($dscLines.Count - $newDscContent.Count) lines)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Failed to write modified DSC file" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            }
         } else {
-            Write-Host "Dev Drive resource not found in DSC file (may have already been removed)"
+            Write-Log "Dev Drive resource not found in DSC file (may have already been removed)" -Level 'INFO' -Section "Dev Flows Installation"
         }
     } else {
         Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
@@ -1323,18 +1338,51 @@ else {
     }
     
     # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
+    Write-Log "Preparing to run winget configuration for Dev flows DSC..." -Level 'INFO' -Section "Dev Flows Installation"
+    Write-Log "DSC file path: $dscAdmin" -Level 'INFO' -Section "Dev Flows Installation"
+    if (-not (Test-Path $dscAdmin)) {
+        $script:ErrorCount++
+        Write-Log "DSC file does not exist: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation"
+        End-Section "Dev Flows Installation"
+        return
+    }
+    
     try {
-        Write-Log "Running winget configuration for Dev flows DSC" -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "Running winget configuration for Dev flows DSC (this may take several minutes)..." -Level 'INFO' -Section "Dev Flows Installation"
         $configStart = Get-Date
-        $configOutput = winget configuration -f $dscAdmin --accept-configuration-agreements 2>&1
+        
+        # Run winget configuration with output streaming to see progress
+        $configOutput = @()
+        $process = Start-Process -FilePath "winget" -ArgumentList "configuration", "-f", $dscAdmin, "--accept-configuration-agreements" -NoNewWindow -PassThru -RedirectStandardOutput "C:\temp\winget-config-output.txt" -RedirectStandardError "C:\temp\winget-config-error.txt" -Wait
+        
+        # Read the output files
+        if (Test-Path "C:\temp\winget-config-output.txt") {
+            $configOutput += Get-Content "C:\temp\winget-config-output.txt" -ErrorAction SilentlyContinue
+        }
+        if (Test-Path "C:\temp\winget-config-error.txt") {
+            $configOutput += Get-Content "C:\temp\winget-config-error.txt" -ErrorAction SilentlyContinue
+        }
+        
         $configDuration = (Get-Date) - $configStart
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "Dev flows DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+        $exitCode = $process.ExitCode
+        
+        if ($exitCode -eq 0) {
+            Write-Log "Dev flows DSC configuration completed successfully (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            if ($configOutput.Count -gt 0) {
+                Write-Log "Configuration output (last 20 lines): $($configOutput[-20..-1] -join ' | ')" -Level 'INFO' -Section "Dev Flows Installation"
+            }
         } else {
             $script:ErrorCount++
-            Write-Log "Dev flows DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Dev Flows Installation"
-            Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Dev Flows Installation"
+            Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
+            if ($configOutput.Count -gt 0) {
+                Write-Log "Error output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Dev Flows Installation"
+            }
         }
+        
+        # Clean up temp files
+        Remove-Item "C:\temp\winget-config-output.txt" -ErrorAction SilentlyContinue
+        Remove-Item "C:\temp\winget-config-error.txt" -ErrorAction SilentlyContinue
+        
     } catch {
         $script:ErrorCount++
         Write-Log "Exception during Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
