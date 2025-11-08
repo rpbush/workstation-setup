@@ -509,14 +509,23 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
        Write-Host "UI.Xaml already installed"
    }
    
-   # WinGet bundle
-   $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-   $paths += $wingetBundlePath
-   $uris += "https://aka.ms/getwinget"
-   $fileNames += "WinGet"
+   # Check if WinGet is already installed and working before attempting installation
+   $wingetInstalledSuccessfully = $false
+   $wingetStatus = Test-WinGetInstalled
+   if ($wingetStatus.Installed -and $wingetStatus.Working) {
+       Write-Log "WinGet is already installed and working (Version: $($wingetStatus.Version)). Skipping WinGet installation." -Level 'INFO' -Section "WinGet Bootstrap"
+       $wingetInstalledSuccessfully = $true
+   } else {
+       # WinGet bundle - only add to download list if not already installed
+       $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+       $paths += $wingetBundlePath
+       $uris += "https://aka.ms/getwinget"
+       $fileNames += "WinGet"
+   }
    
-   # Download dependencies
-   for ($i = 0; $i -lt $uris.Length; $i++) {
+   # Download dependencies (only if there are any to download)
+   if ($uris.Count -gt 0) {
+       for ($i = 0; $i -lt $uris.Length; $i++) {
        $filePath = $paths[$i]
        $fileUri = $uris[$i]
        $fileName = $fileNames[$i]
@@ -541,60 +550,66 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
            }
            $paths[$i] = $null
        }
+   } else {
+       Write-Log "All dependencies already installed. Skipping download." -Level 'INFO' -Section "WinGet Bootstrap"
    }
    
-   Write-Host "Installing WinGet and its dependencies..."
-   
-   # Note: Windows App Runtime will be installed via winget after WinGet is installed
-   # This approach is more reliable than direct download
-   
-   # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
-   for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
-       if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
-           Write-Host "Installing: $($fileNames[$i])"
-           try {
-               Add-AppxPackage $paths[$i] -ErrorAction Stop
-               Write-Host "$($fileNames[$i]) installed successfully"
-           } catch {
-               Write-Warning "$($fileNames[$i]) installation failed: $_"
-           }
-       }
-   }
-   
-   # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
-   $wingetInstalledSuccessfully = $false
-   $wingetBundleIndex = $paths.Count - 1
-   if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
-       Write-Log "Installing: Microsoft.DesktopAppInstaller (WinGet)" -Level 'INFO' -Section "WinGet Bootstrap"
-       try {
-           Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
-           Write-Log "WinGet installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-           $wingetInstalledSuccessfully = $true
-       } catch {
-           $errorMessage = $_.Exception.Message
-           Write-Log "WinGet installation failed: $errorMessage" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
-           
-           # Check for specific "package in use" error (0x80073D02)
-           if ($errorMessage -match "0x80073D02" -or $errorMessage -match "resources it modifies are currently in use") {
-               Write-Log "WinGet package is already installed but may be in use. Checking if WinGet command works..." -Level 'WARNING' -Section "WinGet Bootstrap"
-               
-               # Refresh PATH and test if WinGet works now
-               $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-               Start-Sleep -Seconds 2
-               
+   # Only proceed with installation if WinGet is not already installed
+   if (-not $wingetInstalledSuccessfully) {
+       Write-Host "Installing WinGet and its dependencies..."
+       
+       # Note: Windows App Runtime will be installed via winget after WinGet is installed
+       # This approach is more reliable than direct download
+       
+       # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
+       for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
+           if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
+               Write-Host "Installing: $($fileNames[$i])"
                try {
-                   $wingetTest = winget --info 2>$null
-                   if ($wingetTest) {
-                       Write-Log "WinGet is actually working! The installation error was a false alarm." -Level 'SUCCESS' -Section "WinGet Bootstrap"
-                       $wingetInstalledSuccessfully = $true
-                   } else {
-                       Write-Log "WinGet package exists but command not available. May need to close App Installer processes or restart PowerShell." -Level 'WARNING' -Section "WinGet Bootstrap"
-                   }
+                   Add-AppxPackage $paths[$i] -ErrorAction Stop
+                   Write-Host "$($fileNames[$i]) installed successfully"
                } catch {
-                   Write-Log "WinGet command still not available after PATH refresh" -Level 'WARNING' -Section "WinGet Bootstrap"
+                   Write-Warning "$($fileNames[$i]) installation failed: $_"
                }
            }
        }
+       
+       # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
+       $wingetBundleIndex = $paths.Count - 1
+       if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
+           Write-Log "Installing: Microsoft.DesktopAppInstaller (WinGet)" -Level 'INFO' -Section "WinGet Bootstrap"
+           try {
+               Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
+               Write-Log "WinGet installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+               $wingetInstalledSuccessfully = $true
+           } catch {
+               $errorMessage = $_.Exception.Message
+               Write-Log "WinGet installation failed: $errorMessage" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+               
+               # Check for specific "package in use" error (0x80073D02)
+               if ($errorMessage -match "0x80073D02" -or $errorMessage -match "resources it modifies are currently in use") {
+                   Write-Log "WinGet package is already installed but may be in use. Checking if WinGet command works..." -Level 'WARNING' -Section "WinGet Bootstrap"
+                   
+                   # Refresh PATH and test if WinGet works now
+                   $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+                   Start-Sleep -Seconds 2
+                   
+                   try {
+                       $wingetTest = winget --info 2>$null
+                       if ($wingetTest) {
+                           Write-Log "WinGet is actually working! The installation error was a false alarm." -Level 'SUCCESS' -Section "WinGet Bootstrap"
+                           $wingetInstalledSuccessfully = $true
+                       } else {
+                           Write-Log "WinGet package exists but command not available. May need to close App Installer processes or restart PowerShell." -Level 'WARNING' -Section "WinGet Bootstrap"
+                       }
+                   } catch {
+                       Write-Log "WinGet command still not available after PATH refresh" -Level 'WARNING' -Section "WinGet Bootstrap"
+                   }
+               }
+           }
+       }
+   } else {
+       Write-Log "WinGet installation skipped - already installed and working." -Level 'INFO' -Section "WinGet Bootstrap"
    }
    
    # If WinGet installation failed, try Microsoft Store method (if available)
