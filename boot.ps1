@@ -1213,7 +1213,11 @@ else {
         # Create persistent mapping
         Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
         
-        # Use a job with timeout to prevent hanging if server requires credentials or is unreachable
+        # First, try a quick test to see if we can map without credentials (using job with short timeout)
+        $mapSuccess = $false
+        $mapOutput = ""
+        $mapExitCode = -1
+        
         try {
             $mapJob = Start-Job -ScriptBlock {
                 param($drive, $path)
@@ -1224,35 +1228,107 @@ else {
                 }
             } -ArgumentList $sDrive, $sPath
             
-            # Wait for job with 30 second timeout
-            $jobResult = $mapJob | Wait-Job -Timeout 30 | Receive-Job
+            # Wait for job with 10 second timeout (quick check)
+            $jobResult = $mapJob | Wait-Job -Timeout 10 | Receive-Job
+            $mapJob | Stop-Job -ErrorAction SilentlyContinue
             $mapJob | Remove-Job -Force -ErrorAction SilentlyContinue
             
             if ($jobResult) {
                 $mapOutput = $jobResult.Output
                 $mapExitCode = $jobResult.ExitCode
-                Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+                if ($mapExitCode -eq 0) {
+                    $mapSuccess = $true
+                    Write-Log "net use command succeeded without credentials" -Level 'INFO' -Section "Network Drive Mapping"
+                } else {
+                    Write-Log "net use command failed (may need credentials): $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+                }
             } else {
-                # Job timed out or failed
-                $mapJob | Stop-Job -ErrorAction SilentlyContinue
-                $mapJob | Remove-Job -Force -ErrorAction SilentlyContinue
-                $script:ErrorCount++
-                Write-Log "net use command timed out after 30 seconds. Server may be unreachable or waiting for credentials." -Level 'ERROR' -Section "Network Drive Mapping"
-                Write-Log "You may need to map the drive manually: net use $sDrive $sPath /persistent:yes" -Level 'WARNING' -Section "Network Drive Mapping"
-                $mapExitCode = -1
-                $mapOutput = "Command timed out"
+                # Job timed out - likely needs credentials
+                Write-Log "Initial mapping attempt timed out. Server may require credentials." -Level 'INFO' -Section "Network Drive Mapping"
             }
         } catch {
-            # Fallback to direct net use if job method fails
-            Write-Log "Job method failed, trying direct net use command..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
+            Write-Log "Job method failed, will try interactive method: $_" -Level 'WARNING' -Section "Network Drive Mapping"
+        }
+        
+        # If initial attempt failed or timed out, try interactive method with credential prompt
+        if (-not $mapSuccess) {
+            Write-Log "Attempting interactive mapping (may prompt for credentials)..." -Level 'INFO' -Section "Network Drive Mapping"
+            Write-Host ""
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "Network Drive Mapping: $sDrive" -ForegroundColor Yellow
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "The server may require credentials to map $sDrive to $sPath" -ForegroundColor Yellow
+            Write-Host "If a credential prompt appears, please enter your credentials." -ForegroundColor Yellow
+            Write-Host "If no prompt appears, the mapping will be attempted with current credentials." -ForegroundColor Yellow
+            Write-Host ""
+            
             try {
-                $mapResult = net use $sDrive $sPath /persistent:yes 2>&1
-                $mapOutput = $mapResult | Out-String
-                $mapExitCode = $LASTEXITCODE
-                Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+                # Try using New-PSDrive first (supports credential prompts better)
+                # Check if we can get credentials interactively
+                $credential = $null
+                try {
+                    # Try to get credentials - this will prompt if needed
+                    $credential = Get-Credential -Message "Enter credentials for $serverName (or click Cancel to use current credentials)" -UserName "$serverName\username" -ErrorAction SilentlyContinue
+                } catch {
+                    # User cancelled or no credential prompt needed
+                }
+                
+                if ($credential) {
+                    # Use credentials with New-PSDrive
+                    Write-Log "Using provided credentials for mapping..." -Level 'INFO' -Section "Network Drive Mapping"
+                    try {
+                        $psDrive = New-PSDrive -Name $sDrive.Replace(':', '') -PSProvider FileSystem -Root $sPath -Credential $credential -Persist -ErrorAction Stop
+                        Write-Log "PSDrive created successfully" -Level 'INFO' -Section "Network Drive Mapping"
+                        
+                        # Convert PSDrive to persistent net use mapping
+                        # Remove the PSDrive and create a net use mapping with credentials
+                        Remove-PSDrive -Name $sDrive.Replace(':', '') -Force -ErrorAction SilentlyContinue
+                        
+                        # Use net use with credentials
+                        $username = $credential.UserName
+                        $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                        $mapResult = cmd /c "echo $password | net use $sDrive $sPath /user:$username /persistent:yes" 2>&1
+                        $mapOutput = $mapResult | Out-String
+                        $mapExitCode = $LASTEXITCODE
+                        
+                        # Clear password from memory
+                        $password = $null
+                    } catch {
+                        Write-Log "PSDrive method failed, trying net use with credentials..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
+                        # Fall through to net use method
+                    }
+                }
+                
+                # If credential method didn't work or wasn't used, try direct net use (will prompt if needed)
+                if (-not $mapSuccess) {
+                    Write-Log "Attempting direct net use command (will prompt for credentials if needed)..." -Level 'INFO' -Section "Network Drive Mapping"
+                    
+                    # Use Start-Process to allow interactive credential prompt
+                    $tempOutput = [System.IO.Path]::GetTempFileName()
+                    $tempError = [System.IO.Path]::GetTempFileName()
+                    
+                    $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
+                    
+                    $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+                    $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                    if ($errorOutput) {
+                        $mapOutput += "`nError: $errorOutput"
+                    }
+                    $mapExitCode = $process.ExitCode
+                    
+                    Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+                    Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+                    
+                    if ($mapExitCode -eq 0) {
+                        $mapSuccess = $true
+                        Write-Log "net use command succeeded: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
+                    } else {
+                        Write-Log "net use command failed (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                    }
+                }
             } catch {
                 $script:ErrorCount++
-                Write-Log "Direct net use command also failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                Write-Log "Interactive mapping method failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
                 $mapExitCode = -1
                 $mapOutput = "Command failed: $_"
             }
@@ -1653,39 +1729,67 @@ else {
     
     try {
         Write-Log "Running winget configuration for Dev flows DSC (this may take several minutes)..." -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "DSC file contains packages: Git, PowerShell 7, PowerToys, Signal, Steam, 7zip, Notepad++, GitHub CLI, Cursor, Windows Terminal, and more..." -Level 'INFO' -Section "Dev Flows Installation"
         $configStart = Get-Date
         
         # Run winget configuration with output streaming to see progress
-        $configOutput = @()
-        $process = Start-Process -FilePath "winget" -ArgumentList "configuration", "-f", $dscAdmin, "--accept-configuration-agreements" -NoNewWindow -PassThru -RedirectStandardOutput "C:\temp\winget-config-output.txt" -RedirectStandardError "C:\temp\winget-config-error.txt" -Wait
+        $outputFile = "C:\temp\winget-config-output-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+        $errorFile = "C:\temp\winget-config-error-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+        
+        $process = Start-Process -FilePath "winget" -ArgumentList "configuration", "-f", $dscAdmin, "--accept-configuration-agreements" -NoNewWindow -PassThru -RedirectStandardOutput $outputFile -RedirectStandardError $errorFile -Wait
         
         # Read the output files
-        if (Test-Path "C:\temp\winget-config-output.txt") {
-            $configOutput += Get-Content "C:\temp\winget-config-output.txt" -ErrorAction SilentlyContinue
+        $configOutput = @()
+        if (Test-Path $outputFile) {
+            $configOutput += Get-Content $outputFile -ErrorAction SilentlyContinue
+            Write-Log "Standard output file: $outputFile" -Level 'INFO' -Section "Dev Flows Installation"
         }
-        if (Test-Path "C:\temp\winget-config-error.txt") {
-            $configOutput += Get-Content "C:\temp\winget-config-error.txt" -ErrorAction SilentlyContinue
+        if (Test-Path $errorFile) {
+            $errorOutput = Get-Content $errorFile -ErrorAction SilentlyContinue
+            if ($errorOutput.Count -gt 0) {
+                $configOutput += $errorOutput
+                Write-Log "Error output file: $errorFile" -Level 'INFO' -Section "Dev Flows Installation"
+            }
         }
         
         $configDuration = (Get-Date) - $configStart
         $exitCode = $process.ExitCode
         
+        Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
+        
+        # Log full output (important for debugging)
+        if ($configOutput.Count -gt 0) {
+            Write-Log "Full configuration output ($($configOutput.Count) lines):" -Level 'INFO' -Section "Dev Flows Installation"
+            # Log in chunks to avoid overwhelming the log
+            $chunkSize = 50
+            for ($i = 0; $i -lt $configOutput.Count; $i += $chunkSize) {
+                $chunk = $configOutput[$i..([Math]::Min($i + $chunkSize - 1, $configOutput.Count - 1))]
+                Write-Log "Lines $($i+1)-$([Math]::Min($i + $chunkSize, $configOutput.Count)): $($chunk -join ' | ')" -Level 'INFO' -Section "Dev Flows Installation"
+            }
+        } else {
+            Write-Log "No output captured from winget configuration" -Level 'WARNING' -Section "Dev Flows Installation"
+        }
+        
         if ($exitCode -eq 0) {
-            Write-Log "Dev flows DSC configuration completed successfully (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-            if ($configOutput.Count -gt 0) {
-                Write-Log "Configuration output (last 20 lines): $($configOutput[-20..-1] -join ' | ')" -Level 'INFO' -Section "Dev Flows Installation"
+            Write-Log "Dev flows DSC configuration completed successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            
+            # Check if any packages were actually installed by looking for installation messages in output
+            $installMessages = $configOutput | Where-Object { $_ -match "installed|Installing|Successfully" }
+            if ($installMessages.Count -gt 0) {
+                Write-Log "Installation activity detected. Packages processed: $($installMessages.Count) messages" -Level 'INFO' -Section "Dev Flows Installation"
+                foreach ($msg in $installMessages) {
+                    Write-Log "  - $msg" -Level 'INFO' -Section "Dev Flows Installation"
+                }
+            } else {
+                Write-Log "No installation activity detected in output. Packages may already be installed or configuration may have been skipped." -Level 'WARNING' -Section "Dev Flows Installation"
             }
         } else {
             $script:ErrorCount++
             Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
-            if ($configOutput.Count -gt 0) {
-                Write-Log "Error output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Dev Flows Installation"
-            }
         }
         
-        # Clean up temp files
-        Remove-Item "C:\temp\winget-config-output.txt" -ErrorAction SilentlyContinue
-        Remove-Item "C:\temp\winget-config-error.txt" -ErrorAction SilentlyContinue
+        # Keep output files for debugging (user can delete them later)
+        Write-Log "Output files saved for debugging: $outputFile, $errorFile" -Level 'INFO' -Section "Dev Flows Installation"
         
     } catch {
         $script:ErrorCount++
