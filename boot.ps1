@@ -318,23 +318,72 @@ Start-Section "WinGet Configuration Enable"
 try {
     Write-Log "Checking if WinGet configuration features are enabled..." -Level 'INFO' -Section "WinGet Configuration Enable"
     
-    # Check if configuration is already enabled by trying to get configuration status
-    $configCheck = winget configure --info 2>&1
-    $configEnabled = $LASTEXITCODE -eq 0 -and $configCheck -notmatch "Extended features are not enabled"
+    # Check if configuration is already enabled by trying to get configuration status (with timeout)
+    $configCheck = $null
+    $configCheckJob = Start-Job -ScriptBlock { winget configure --info 2>&1 | Out-String }
+    $configCheckResult = $configCheckJob | Wait-Job -Timeout 10 | Receive-Job
+    $configCheckJob | Remove-Job -Force -ErrorAction SilentlyContinue
+    
+    if ($configCheckResult) {
+        $configCheck = $configCheckResult
+    }
+    
+    $configEnabled = $configCheck -and $configCheck -notmatch "Extended features are not enabled"
     
     if (-not $configEnabled) {
         Write-Log "WinGet configuration features are not enabled. Enabling them..." -Level 'INFO' -Section "WinGet Configuration Enable"
         
-        # Enable configuration features
-        $enableOutput = winget configure --enable 2>&1 | Out-String
-        $enableExitCode = $LASTEXITCODE
+        # Enable configuration features using Start-Process with timeout to prevent hanging
+        $enableStart = Get-Date
+        $tempOutput = [System.IO.Path]::GetTempFileName()
+        $tempError = [System.IO.Path]::GetTempFileName()
+        
+        $process = Start-Process -FilePath "winget.exe" -ArgumentList "configure", "--enable" -NoNewWindow -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction Stop
+        
+        # Wait for process with timeout (max 2 minutes)
+        $timeoutSeconds = 120
+        $timeoutReached = $false
+        $elapsed = 0
+        while (-not $process.HasExited) {
+            Start-Sleep -Seconds 1
+            $elapsed = ((Get-Date) - $enableStart).TotalSeconds
+            if ($elapsed -ge $timeoutSeconds) {
+                $timeoutReached = $true
+                break
+            }
+        }
+        
+        if ($timeoutReached -or (-not $process.HasExited)) {
+            Write-Log "winget configure --enable exceeded timeout of $timeoutSeconds seconds. Terminating..." -Level 'WARNING' -Section "WinGet Configuration Enable"
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                }
+            } catch {
+                # Ignore errors killing process
+            }
+            $enableExitCode = -1
+            $enableOutput = "Process timed out after $timeoutSeconds seconds"
+        } else {
+            $enableExitCode = $process.ExitCode
+            $enableOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+            $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+            if ($errorOutput) {
+                $enableOutput += "`nError: $errorOutput"
+            }
+        }
+        
+        Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempError -Force -ErrorAction SilentlyContinue
         
         if ($enableExitCode -eq 0) {
             Write-Log "WinGet configuration features enabled successfully" -Level 'SUCCESS' -Section "WinGet Configuration Enable"
         } else {
             $script:ErrorCount++
             Write-Log "Failed to enable WinGet configuration features (Exit code: $enableExitCode)" -Level 'ERROR' -Section "WinGet Configuration Enable"
-            Write-Log "Output: $enableOutput" -Level 'ERROR' -Section "WinGet Configuration Enable"
+            if ($enableOutput) {
+                Write-Log "Output: $enableOutput" -Level 'ERROR' -Section "WinGet Configuration Enable"
+            }
             Write-Log "DSC configurations may fail. You may need to run 'winget configure --enable' manually." -Level 'WARNING' -Section "WinGet Configuration Enable"
         }
     } else {
@@ -1200,15 +1249,22 @@ else {
         $cmdkeyTarget = $sPath
         $credentialsStored = $false
         
-        # Check if credentials are already stored for this path
+        # Check if credentials are already stored for this path or server
         try {
             $cmdkeyList = cmdkey /list 2>&1 | Out-String
+            # Check for full path
             if ($cmdkeyList -match [regex]::Escape($cmdkeyTarget)) {
                 Write-Log "Credentials already stored in credential manager for $cmdkeyTarget" -Level 'INFO' -Section "Network Drive Mapping"
                 $credentialsStored = $true
             }
+            # Also check for server name (credentials might be stored for just the server)
+            elseif ($cmdkeyList -match [regex]::Escape($serverName)) {
+                Write-Log "Credentials found for server $serverName (may work for $cmdkeyTarget)" -Level 'INFO' -Section "Network Drive Mapping"
+                $credentialsStored = $true
+            }
         } catch {
             # Ignore errors checking credential store
+            Write-Log "Could not check credential store: $_" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # If credentials are not stored, prompt user to store them
@@ -1238,7 +1294,16 @@ else {
                     
                     if ($cmdkeySuccess) {
                         Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        $credentialsStored = $true
+                        # Re-check to confirm credentials are stored
+                        Start-Sleep -Seconds 1
+                        $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
+                        if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
+                            $credentialsStored = $true
+                            Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        } else {
+                            Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
+                            $credentialsStored = $true  # Assume success if cmdkey returned 0
+                        }
                     } else {
                         Write-Log "Failed to store credentials: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
                         $script:ErrorCount++
@@ -1426,11 +1491,11 @@ else {
                 if ($mapExitCode -eq 0) {
                     $mapSuccess = $true
                     Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                } else {
+        } else {
                     Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
                     $script:WarningCount++
-                }
-            } catch {
+        }
+    } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to map drive: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
                 $mapExitCode = -1
