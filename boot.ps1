@@ -313,6 +313,41 @@ try {
 End-Section "WinGet Bootstrap"
 
 # ---------------
+# Enable WinGet Configuration Features (required for DSC files)
+Start-Section "WinGet Configuration Enable"
+try {
+    Write-Log "Checking if WinGet configuration features are enabled..." -Level 'INFO' -Section "WinGet Configuration Enable"
+    
+    # Check if configuration is already enabled by trying to get configuration status
+    $configCheck = winget configure --info 2>&1
+    $configEnabled = $LASTEXITCODE -eq 0 -and $configCheck -notmatch "Extended features are not enabled"
+    
+    if (-not $configEnabled) {
+        Write-Log "WinGet configuration features are not enabled. Enabling them..." -Level 'INFO' -Section "WinGet Configuration Enable"
+        
+        # Enable configuration features
+        $enableOutput = winget configure --enable 2>&1 | Out-String
+        $enableExitCode = $LASTEXITCODE
+        
+        if ($enableExitCode -eq 0) {
+            Write-Log "WinGet configuration features enabled successfully" -Level 'SUCCESS' -Section "WinGet Configuration Enable"
+        } else {
+            $script:ErrorCount++
+            Write-Log "Failed to enable WinGet configuration features (Exit code: $enableExitCode)" -Level 'ERROR' -Section "WinGet Configuration Enable"
+            Write-Log "Output: $enableOutput" -Level 'ERROR' -Section "WinGet Configuration Enable"
+            Write-Log "DSC configurations may fail. You may need to run 'winget configure --enable' manually." -Level 'WARNING' -Section "WinGet Configuration Enable"
+        }
+    } else {
+        Write-Log "WinGet configuration features are already enabled" -Level 'INFO' -Section "WinGet Configuration Enable"
+    }
+} catch {
+    $script:ErrorCount++
+    Write-Log "Exception while enabling WinGet configuration features" -Level 'ERROR' -Section "WinGet Configuration Enable" -Exception $_
+    Write-Log "DSC configurations may fail. You may need to run 'winget configure --enable' manually." -Level 'WARNING' -Section "WinGet Configuration Enable"
+}
+End-Section "WinGet Configuration Enable"
+
+# ---------------
 # Installing NFS Client feature (moved to start as it may require reboot)
 Start-Section "NFS Client Installation"
 $nfsNeedsReboot = $false
@@ -327,15 +362,15 @@ try {
             $nfsInstalled = $true
             break
         } else {
-            $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
-            if ($nfsFeature) {
+        $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+        if ($nfsFeature) {
                 Write-Log "Installing NFS Client feature ($featureName) - this may take a few minutes..." -Level 'INFO' -Section "NFS Client Installation"
                 try {
                     Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
                     Write-Log "NFS Client feature ($featureName) installed successfully" -Level 'SUCCESS' -Section "NFS Client Installation"
-                    $nfsInstalled = $true
-                    $nfsNeedsReboot = $true
-                    break
+                $nfsInstalled = $true
+                $nfsNeedsReboot = $true
+                break
                 } catch {
                     $script:ErrorCount++
                     Write-Log "Failed to install NFS Client feature ($featureName)" -Level 'ERROR' -Section "NFS Client Installation" -Exception $_
@@ -519,7 +554,7 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
                if ($installed) {
                    # Check if it got installed (use wildcard to match versioned package names)
                    $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
-                   if ($appRuntimeInstalled) {
+               if ($appRuntimeInstalled) {
                        Write-Log "Windows App Runtime installed via Microsoft Store" -Level 'SUCCESS' -Section "WinGet Bootstrap"
                    }
                }
@@ -572,39 +607,39 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
        $wingetInstalledSuccessfully = $true
    } else {
        # WinGet bundle - only add to download list if not already installed
-       $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-       $paths += $wingetBundlePath
-       $uris += "https://aka.ms/getwinget"
-       $fileNames += "WinGet"
+   $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+   $paths += $wingetBundlePath
+   $uris += "https://aka.ms/getwinget"
+   $fileNames += "WinGet"
    }
    
    # Download dependencies (only if there are any to download)
    if ($uris.Count -gt 0) {
-       for ($i = 0; $i -lt $uris.Length; $i++) {
-           $filePath = $paths[$i]
-           $fileUri = $uris[$i]
-           $fileName = $fileNames[$i]
-           Write-Host "Downloading: $fileName from $fileUri"
-           try {
-               if (Test-Path $filePath) {
-                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-               }
-               Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
-               
-               # Validate downloaded file
-               $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
-               if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
-                   Write-Warning "$fileName download appears invalid, will retry or skip"
-                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-                   $paths[$i] = $null
-               }
-           } catch {
-               Write-Warning "Failed to download $fileName : $_"
-               if (Test-Path $filePath) {
-                   Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-               }
+   for ($i = 0; $i -lt $uris.Length; $i++) {
+       $filePath = $paths[$i]
+       $fileUri = $uris[$i]
+       $fileName = $fileNames[$i]
+       Write-Host "Downloading: $fileName from $fileUri"
+       try {
+           if (Test-Path $filePath) {
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+           }
+           Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
+           
+           # Validate downloaded file
+           $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
+           if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
+               Write-Warning "$fileName download appears invalid, will retry or skip"
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
                $paths[$i] = $null
            }
+       } catch {
+           Write-Warning "Failed to download $fileName : $_"
+           if (Test-Path $filePath) {
+               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
+           }
+           $paths[$i] = $null
+       }
        }
    } else {
        Write-Log "All dependencies already installed. Skipping download." -Level 'INFO' -Section "WinGet Bootstrap"
@@ -612,33 +647,33 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
    
    # Only proceed with installation if WinGet is not already installed
    if (-not $wingetInstalledSuccessfully) {
-       Write-Host "Installing WinGet and its dependencies..."
-       
-       # Note: Windows App Runtime will be installed via winget after WinGet is installed
-       # This approach is more reliable than direct download
-       
-       # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
-       for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
-           if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
-               Write-Host "Installing: $($fileNames[$i])"
-               try {
-                   Add-AppxPackage $paths[$i] -ErrorAction Stop
-                   Write-Host "$($fileNames[$i]) installed successfully"
-               } catch {
-                   Write-Warning "$($fileNames[$i]) installation failed: $_"
-               }
+   Write-Host "Installing WinGet and its dependencies..."
+   
+   # Note: Windows App Runtime will be installed via winget after WinGet is installed
+   # This approach is more reliable than direct download
+   
+   # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
+   for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
+       if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
+           Write-Host "Installing: $($fileNames[$i])"
+           try {
+               Add-AppxPackage $paths[$i] -ErrorAction Stop
+               Write-Host "$($fileNames[$i]) installed successfully"
+           } catch {
+               Write-Warning "$($fileNames[$i]) installation failed: $_"
            }
        }
-       
-       # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
-       $wingetBundleIndex = $paths.Count - 1
-       if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
+   }
+   
+   # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
+   $wingetBundleIndex = $paths.Count - 1
+   if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
            Write-Log "Installing: Microsoft.DesktopAppInstaller (WinGet)" -Level 'INFO' -Section "WinGet Bootstrap"
-           try {
-               Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
+       try {
+           Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
                Write-Log "WinGet installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-               $wingetInstalledSuccessfully = $true
-           } catch {
+           $wingetInstalledSuccessfully = $true
+       } catch {
                $errorMessage = $_.Exception.Message
                Write-Log "WinGet installation failed: $errorMessage" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
                
@@ -692,11 +727,11 @@ if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent 
                
                $installed = Wait-ForStoreInstallation -AppName "App Installer (WinGet)" -PackageName "Microsoft.DesktopAppInstaller"
                if ($installed) {
-                   # Check if App Installer was installed
-                   $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
-                   if ($appInstallerCheck) {
+               # Check if App Installer was installed
+               $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
+               if ($appInstallerCheck) {
                        Write-Log "App Installer (WinGet) detected after Store installation" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-                       $wingetInstalledSuccessfully = $true
+                   $wingetInstalledSuccessfully = $true
                    }
                }
            } catch {
@@ -924,8 +959,8 @@ else {
         if (Test-WindowsFeatureInstalled -FeatureName $sandboxFeatureName) {
             Write-Log "Windows Sandbox feature is already installed" -Level 'INFO' -Section "Windows Sandbox Installation"
         } else {
-            $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
-            if ($sandboxFeature) {
+        $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
+        if ($sandboxFeature) {
                 Write-Log "Installing Windows Sandbox feature - this may take a few minutes..." -Level 'INFO' -Section "Windows Sandbox Installation"
                 try {
                     Enable-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -All -NoRestart -ErrorAction Stop | Out-Null
@@ -933,11 +968,11 @@ else {
                 } catch {
                     $script:ErrorCount++
                     Write-Log "Failed to install Windows Sandbox feature" -Level 'ERROR' -Section "Windows Sandbox Installation" -Exception $_
-                }
-            } else {
+            }
+        } else {
                 $script:WarningCount++
                 Write-Log "Could not find Windows Sandbox feature. It may not be available on this Windows edition." -Level 'WARNING' -Section "Windows Sandbox Installation"
-            }
+        }
         }
         End-Section "Windows Sandbox Installation"
     } catch {
@@ -992,8 +1027,8 @@ else {
                         Write-Log "Windows Subsystem for Linux feature is already enabled" -Level 'INFO' -Section "WSL Installation"
                     } else {
                         Write-Log "Enabling Windows Subsystem for Linux feature..." -Level 'INFO' -Section "WSL Installation"
-                        $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction SilentlyContinue
-                        if ($wslFeature) {
+                    $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction SilentlyContinue
+                    if ($wslFeature) {
                             try {
                                 Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -All -NoRestart -ErrorAction Stop | Out-Null
                                 Write-Log "Windows Subsystem for Linux feature enabled successfully" -Level 'SUCCESS' -Section "WSL Installation"
@@ -1009,8 +1044,8 @@ else {
                         Write-Log "Virtual Machine Platform feature is already enabled" -Level 'INFO' -Section "WSL Installation"
                     } else {
                         Write-Log "Enabling Virtual Machine Platform feature (required for WSL 2)..." -Level 'INFO' -Section "WSL Installation"
-                        $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
-                        if ($vmPlatformFeature) {
+                    $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
+                    if ($vmPlatformFeature) {
                             try {
                                 Enable-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -All -NoRestart -ErrorAction Stop | Out-Null
                                 Write-Log "Virtual Machine Platform feature enabled successfully" -Level 'SUCCESS' -Section "WSL Installation"
@@ -1158,6 +1193,71 @@ else {
         # NFS Client feature installation moved to start of script (may require reboot)
         # Windows Sandbox feature installation moved to Windows Features section
         
+        # Prompt for and store credentials at the start (used for both NFS and SMB drives)
+        $sDrive = "S:"
+        $sPath = "\\FS-1\Storage"
+        $serverName = ($sPath -split '\\')[2]
+        $cmdkeyTarget = $sPath
+        $credentialsStored = $false
+        
+        # Check if credentials are already stored for this path
+        try {
+            $cmdkeyList = cmdkey /list 2>&1 | Out-String
+            if ($cmdkeyList -match [regex]::Escape($cmdkeyTarget)) {
+                Write-Log "Credentials already stored in credential manager for $cmdkeyTarget" -Level 'INFO' -Section "Network Drive Mapping"
+                $credentialsStored = $true
+            }
+        } catch {
+            # Ignore errors checking credential store
+        }
+        
+        # If credentials are not stored, prompt user to store them
+        if (-not $credentialsStored) {
+            Write-Host ""
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "Network Drive Mapping: Credentials" -ForegroundColor Yellow
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "Network drives require credentials to map." -ForegroundColor Yellow
+            Write-Host "Please enter your credentials to store them in Windows Credential Manager." -ForegroundColor Yellow
+            Write-Host "These credentials will be used for both N: (NFS) and S: (SMB) drive mappings." -ForegroundColor Yellow
+            Write-Host ""
+            
+            try {
+                # Prompt for credentials
+                $credential = Get-Credential -Message "Enter credentials for $serverName (format: DOMAIN\username or username)" -UserName "$serverName\" -ErrorAction Stop
+                
+                if ($credential) {
+                    $username = $credential.UserName
+                    $networkCred = $credential.GetNetworkCredential()
+                    $password = $networkCred.Password
+                    
+                    # Store credentials using cmdkey for SMB path
+                    Write-Log "Storing credentials in Windows Credential Manager for $cmdkeyTarget..." -Level 'INFO' -Section "Network Drive Mapping"
+                    $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$username /pass:$password 2>&1 | Out-String
+                    $cmdkeySuccess = $LASTEXITCODE -eq 0
+                    
+                    if ($cmdkeySuccess) {
+                        Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        $credentialsStored = $true
+                    } else {
+                        Write-Log "Failed to store credentials: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
+                        $script:ErrorCount++
+                    }
+                    
+                    # Clear password from memory
+                    $password = $null
+                    $networkCred = $null
+                    $credential = $null
+                } else {
+                    Write-Log "User cancelled credential entry" -Level 'WARNING' -Section "Network Drive Mapping"
+                    $script:WarningCount++
+                }
+            } catch {
+                Write-Log "Failed to get credentials from user: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                $script:ErrorCount++
+            }
+        }
+        
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
         $nPath = "NFS:/media"
@@ -1228,7 +1328,7 @@ else {
                             Write-Log "Drive $nDrive exists but not accessible (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
                             Start-Sleep -Seconds 2
                         }
-                    } else {
+        } else {
                         Write-Log "Drive $nDrive in net use list but not accessible via Test-Path (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
                         Start-Sleep -Seconds 2
                     }
@@ -1264,12 +1364,9 @@ else {
         }
         
         # Map S: drive to \\FS-1\Storage (Windows Network)
-        $sDrive = "S:"
-        $sPath = "\\FS-1\Storage"
         Write-Log "Attempting to map $sDrive to $sPath" -Level 'INFO' -Section "Network Drive Mapping"
         
         # Test network connectivity to the server first (with timeout to prevent hanging)
-        $serverName = ($sPath -split '\\')[2]
         Write-Log "Testing connectivity to server: $serverName" -Level 'INFO' -Section "Network Drive Mapping"
         try {
             # Use a job with timeout to prevent hanging
@@ -1301,182 +1398,49 @@ else {
         # Create persistent mapping
         Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
         
-        # First, try a quick test to see if we can map without credentials (using job with short timeout)
+        # If credentials are stored (either already existed or just stored), attempt mapping
         $mapSuccess = $false
         $mapOutput = ""
         $mapExitCode = -1
         
-        try {
-            $mapJob = Start-Job -ScriptBlock {
-                param($drive, $path)
-                $result = net use $drive $path /persistent:yes 2>&1
-                return @{
-                    Output = $result | Out-String
-                    ExitCode = $LASTEXITCODE
-                }
-            } -ArgumentList $sDrive, $sPath
-            
-            # Wait for job with 10 second timeout (quick check)
-            $jobResult = $mapJob | Wait-Job -Timeout 10 | Receive-Job
-            $mapJob | Stop-Job -ErrorAction SilentlyContinue
-            $mapJob | Remove-Job -Force -ErrorAction SilentlyContinue
-            
-            if ($jobResult) {
-                $mapOutput = $jobResult.Output
-                $mapExitCode = $jobResult.ExitCode
-                if ($mapExitCode -eq 0) {
-                    $mapSuccess = $true
-                    Write-Log "net use command succeeded without credentials" -Level 'INFO' -Section "Network Drive Mapping"
-                } else {
-                    Write-Log "net use command failed (may need credentials): $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
-                }
-            } else {
-                # Job timed out - likely needs credentials
-                Write-Log "Initial mapping attempt timed out. Server may require credentials." -Level 'INFO' -Section "Network Drive Mapping"
-            }
-        } catch {
-            Write-Log "Job method failed, will try interactive method: $_" -Level 'WARNING' -Section "Network Drive Mapping"
-        }
-        
-        # If initial attempt failed or timed out, try interactive method with credential prompt
-        if (-not $mapSuccess) {
-            Write-Log "Attempting interactive mapping (may prompt for credentials)..." -Level 'INFO' -Section "Network Drive Mapping"
-            Write-Host ""
-            Write-Host "========================================" -ForegroundColor Yellow
-            Write-Host "Network Drive Mapping: $sDrive" -ForegroundColor Yellow
-            Write-Host "========================================" -ForegroundColor Yellow
-            Write-Host "The server may require credentials to map $sDrive to $sPath" -ForegroundColor Yellow
-            Write-Host "If a credential prompt appears, please enter your credentials." -ForegroundColor Yellow
-            Write-Host "If no prompt appears, the mapping will be attempted with current credentials." -ForegroundColor Yellow
-            Write-Host ""
+        if ($credentialsStored) {
+            Write-Log "Attempting to map drive using stored credentials..." -Level 'INFO' -Section "Network Drive Mapping"
             
             try {
-                # Try using New-PSDrive first (supports credential prompts better)
-                # Check if we can get credentials interactively
-                $credential = $null
-                try {
-                    # Try to get credentials - this will prompt if needed
-                    $credential = Get-Credential -Message "Enter credentials for $serverName (or click Cancel to use current credentials)" -UserName "$serverName\username" -ErrorAction SilentlyContinue
-                } catch {
-                    # User cancelled or no credential prompt needed
-                }
+                # Use net use - it will automatically use the stored credentials
+                $tempOutput = [System.IO.Path]::GetTempFileName()
+                $tempError = [System.IO.Path]::GetTempFileName()
                 
-                if ($credential) {
-                    # Use credentials with New-PSDrive (creates persistent mapping)
-                    Write-Log "Using provided credentials for mapping..." -Level 'INFO' -Section "Network Drive Mapping"
-                    try {
-                        $driveName = $sDrive.Replace(':', '')
-                        Write-Log "Creating persistent PSDrive with credentials..." -Level 'INFO' -Section "Network Drive Mapping"
-                        
-                        # Remove any existing PSDrive first
-                        Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
-                        
-                        # Create persistent PSDrive with credentials
-                        $psDrive = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $sPath -Credential $credential -Persist -ErrorAction Stop
-                        Write-Log "PSDrive created successfully: $driveName" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        
-                        # Verify the drive is accessible
-                        $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
-                        if ($testPath) {
-                            $mapSuccess = $true
-                            $mapExitCode = 0
-                            $mapOutput = "PSDrive created and verified successfully"
-                            Write-Log "Drive $sDrive is accessible: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        } else {
-                            Write-Log "PSDrive created but not accessible via Test-Path" -Level 'WARNING' -Section "Network Drive Mapping"
-                            # Still consider it a success if PSDrive was created
-                            $mapSuccess = $true
-                            $mapExitCode = 0
-                            $mapOutput = "PSDrive created (access verification pending)"
-                        }
-                    } catch {
-                        Write-Log "PSDrive method failed, trying net use with cmdkey..." -Level 'WARNING' -Section "Network Drive Mapping" -Exception $_
-                        
-                        # Fallback: Use cmdkey + net use
-                        try {
-                            $username = $credential.UserName
-                            $networkCred = $credential.GetNetworkCredential()
-                            $password = $networkCred.Password
-                            
-                            # Store credentials using cmdkey
-                            Write-Log "Storing credentials using cmdkey for fallback method..." -Level 'INFO' -Section "Network Drive Mapping"
-                            $cmdkeyTarget = $sPath
-                            $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$username /pass:$password 2>&1 | Out-String
-                            $cmdkeySuccess = $LASTEXITCODE -eq 0
-                            
-                            if ($cmdkeySuccess) {
-                                Write-Log "Credentials stored successfully with cmdkey" -Level 'INFO' -Section "Network Drive Mapping"
-                                
-                                # Now use net use - it will use the stored credentials
-                                $tempOutput = [System.IO.Path]::GetTempFileName()
-                                $tempError = [System.IO.Path]::GetTempFileName()
-                                
-                                $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
-                                
-                                $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-                                $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
-                                if ($errorOutput) {
-                                    $mapOutput += "`nError: $errorOutput"
-                                }
-                                $mapExitCode = $process.ExitCode
-                                
-                                Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
-                                Remove-Item $tempError -Force -ErrorAction SilentlyContinue
-                                
-                                if ($mapExitCode -eq 0) {
-                                    $mapSuccess = $true
-                                    Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
-                                } else {
-                                    Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                                    # Clean up stored credentials on failure
-                                    cmdkey /delete:$cmdkeyTarget 2>&1 | Out-Null
-                                }
-                            } else {
-                                Write-Log "Failed to store credentials with cmdkey: $cmdkeyResult" -Level 'WARNING' -Section "Network Drive Mapping"
-                            }
-                            
-                            # Clear password from memory
-                            $password = $null
-                            $networkCred = $null
-                        } catch {
-                            Write-Log "Fallback credential method also failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
-                        }
-                    }
-                }
+                $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
                 
-                # If credential method didn't work or wasn't used, try direct net use (will prompt if needed)
-                if (-not $mapSuccess) {
-                    Write-Log "Attempting direct net use command (will prompt for credentials if needed)..." -Level 'INFO' -Section "Network Drive Mapping"
-                    
-                    # Use Start-Process to allow interactive credential prompt
-                    $tempOutput = [System.IO.Path]::GetTempFileName()
-                    $tempError = [System.IO.Path]::GetTempFileName()
-                    
-                    $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
-                    
-                    $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-                    $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
-                    if ($errorOutput) {
-                        $mapOutput += "`nError: $errorOutput"
-                    }
-                    $mapExitCode = $process.ExitCode
-                    
-                    Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
-                    Remove-Item $tempError -Force -ErrorAction SilentlyContinue
-                    
-                    if ($mapExitCode -eq 0) {
-                        $mapSuccess = $true
-                        Write-Log "net use command succeeded: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
-                    } else {
-                        Write-Log "net use command failed (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                    }
+                $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+                $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                if ($errorOutput) {
+                    $mapOutput += "`nError: $errorOutput"
+                }
+                $mapExitCode = $process.ExitCode
+                
+                Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+                Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+                
+                if ($mapExitCode -eq 0) {
+                    $mapSuccess = $true
+                    Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                } else {
+                    Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                    $script:WarningCount++
                 }
             } catch {
                 $script:ErrorCount++
-                Write-Log "Interactive mapping method failed" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                Write-Log "Failed to map drive: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
                 $mapExitCode = -1
                 $mapOutput = "Command failed: $_"
             }
+        } else {
+            Write-Log "Cannot map drive without stored credentials. Skipping $sDrive mapping." -Level 'WARNING' -Section "Network Drive Mapping"
+            $script:WarningCount++
+            $mapExitCode = -1
+            $mapOutput = "Credentials not stored"
         }
         
         if ($mapExitCode -eq 0) {
@@ -1560,7 +1524,7 @@ else {
     try {
         # Check if Windows Terminal is already installed
         if (Test-AppxPackageInstalled -PackageName "Microsoft.WindowsTerminal") {
-            $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+        $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
             Write-Log "Windows Terminal is already installed (Version: $($wtInstalled.Version))" -Level 'INFO' -Section "Windows Terminal Installation"
         } else {
             Write-Host "Installing Windows Terminal using WinGet..."
@@ -1582,9 +1546,9 @@ else {
                         
                         $installed = Wait-ForStoreInstallation -AppName "Windows Terminal" -PackageName "Microsoft.WindowsTerminal"
                         if ($installed) {
-                            # Check if it got installed
-                            $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
-                            if ($wtCheck) {
+                        # Check if it got installed
+                        $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+                        if ($wtCheck) {
                                 Write-Log "Windows Terminal installed via Microsoft Store" -Level 'SUCCESS' -Section "Windows Terminal Installation"
                             }
                         }
@@ -1768,7 +1732,7 @@ else {
                             Write-Log "No generic key found for edition: $keyName" -Level 'WARNING' -Section "Windows HWID Activation"
                             End-Section "Windows HWID Activation"
                             # Continue with rest of script - don't return
-                        } else {
+    } else {
                             $genericKey = $genericKeys[$keyName]
                             Write-Log "Installing generic product key for $keyName..." -Level 'INFO' -Section "Windows HWID Activation"
                             
@@ -1856,7 +1820,7 @@ else {
         Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
         # Don't return here - continue to Dev Flows Installation section
     } else {
-        $officeDscDownloaded = $false
+    $officeDscDownloaded = $false
         
         # Check if file exists locally first
         if (Test-Path $dscOfficeLocal) {
@@ -1867,18 +1831,18 @@ else {
             try {
                 Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
                 $downloadStart = Get-Date
-                Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+        Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
                 $downloadDuration = (Get-Date) - $downloadStart
                 Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
-                $officeDscDownloaded = $true
-            } catch {
+        $officeDscDownloaded = $true
+    } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
                 Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
             }
-        }
-        
-        if ($officeDscDownloaded) {
+    }
+    
+    if ($officeDscDownloaded) {
             try {
                 Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
                 $configStart = Get-Date
@@ -1895,29 +1859,29 @@ else {
                 $script:ErrorCount++
                 Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
             } 
-            
-            if (Test-Path $dscOffice) {
-                Remove-Item $dscOffice -verbose
-            }
-            
-            # Start Outlook and Teams if they exist
-            $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
-            if ($outlookPath) {
-                Start-Process outlook.exe -ErrorAction SilentlyContinue
+        
+        if (Test-Path $dscOffice) {
+            Remove-Item $dscOffice -verbose
+        }
+        
+        # Start Outlook and Teams if they exist
+        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+        if ($outlookPath) {
+            Start-Process outlook.exe -ErrorAction SilentlyContinue
                 Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
-            } else {
+        } else {
                 $script:WarningCount++
                 Write-Log "Outlook.exe not found. Office may not be installed yet." -Level 'WARNING' -Section "Office Installation"
-            }
-            
-            $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
-            if ($teamsPath) {
-                Start-Process ms-teams.exe -ErrorAction SilentlyContinue
-            } else {
+        }
+        
+        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+        if ($teamsPath) {
+            Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+        } else {
                 $script:WarningCount++
                 Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
-            }
         }
+    }
     }  # End of else block for Office DSC configuration
     
     End-Section "Office Installation"
@@ -1941,15 +1905,15 @@ else {
             try {
                 Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
                 $downloadStart = Get-Date
-                Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
                 $downloadDuration = (Get-Date) - $downloadStart
                 Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-            } catch {
+        } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
                 Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
                 End-Section "Dev Flows Installation"
-                return
+            return
             }
         }
         
@@ -2012,8 +1976,8 @@ else {
                     # We've reached the next resource, stop skipping
                     $inDevDriveResource = $false
                     Write-Log "Reached next resource at line $($i+1), ending Dev Drive resource removal" -Level 'INFO' -Section "Dev Flows Installation"
-                    $newDscContent += $line
-                }
+                        $newDscContent += $line
+                    }
                 # Otherwise, skip this line (don't add it to new content)
                 continue
             }
@@ -2047,15 +2011,15 @@ else {
             try {
                 Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
                 $downloadStart = Get-Date
-                Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
                 $downloadDuration = (Get-Date) - $downloadStart
                 Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-            } catch {
+        } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
                 Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
                 End-Section "Dev Flows Installation"
-                return
+            return
             }
         }
     }
