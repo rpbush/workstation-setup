@@ -1595,75 +1595,75 @@ else {
         $teamsInstalled = $true
     }
     
-    # If both are installed, skip DSC configuration
+    # If both are installed, skip DSC configuration but continue with rest of script
     if ($officeInstalled -and $teamsInstalled) {
         Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
-        End-Section "Office Installation"
-        return
-    }
-    
-    $officeDscDownloaded = $false
-    
-    # Check if file exists locally first
-    if (Test-Path $dscOfficeLocal) {
-        Write-Log "Using local Office DSC file: $dscOfficeLocal" -Level 'INFO' -Section "Office Installation"
-        Copy-Item $dscOfficeLocal $dscOffice -Force
-        $officeDscDownloaded = $true
+        # Don't return here - continue to Dev Flows Installation section
     } else {
-        try {
-            Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
-            $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
-            $downloadDuration = (Get-Date) - $downloadStart
-            Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+        $officeDscDownloaded = $false
+        
+        # Check if file exists locally first
+        if (Test-Path $dscOfficeLocal) {
+            Write-Log "Using local Office DSC file: $dscOfficeLocal" -Level 'INFO' -Section "Office Installation"
+            Copy-Item $dscOfficeLocal $dscOffice -Force
             $officeDscDownloaded = $true
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
-            Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
-        }
-    }
-    
-    if ($officeDscDownloaded) {
-        try {
-            Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
-            $configStart = Get-Date
-            $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
-            $configDuration = (Get-Date) - $configStart
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
-            } else {
+        } else {
+            try {
+                Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
+                $downloadStart = Get-Date
+                Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+                $downloadDuration = (Get-Date) - $downloadStart
+                Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+                $officeDscDownloaded = $true
+            } catch {
                 $script:ErrorCount++
-                Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
-                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+                Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+                Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
             }
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
-        } 
-        
-        if (Test-Path $dscOffice) {
-            Remove-Item $dscOffice -verbose
         }
         
-        # Start Outlook and Teams if they exist
-        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
-        if ($outlookPath) {
-            Start-Process outlook.exe -ErrorAction SilentlyContinue
-            Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
-        } else {
-            $script:WarningCount++
-            Write-Log "Outlook.exe not found. Office may not be installed yet." -Level 'WARNING' -Section "Office Installation"
+        if ($officeDscDownloaded) {
+            try {
+                Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
+                $configStart = Get-Date
+                $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
+                $configDuration = (Get-Date) - $configStart
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+                } else {
+                    $script:ErrorCount++
+                    Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
+                    Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+                }
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+            } 
+            
+            if (Test-Path $dscOffice) {
+                Remove-Item $dscOffice -verbose
+            }
+            
+            # Start Outlook and Teams if they exist
+            $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+            if ($outlookPath) {
+                Start-Process outlook.exe -ErrorAction SilentlyContinue
+                Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
+            } else {
+                $script:WarningCount++
+                Write-Log "Outlook.exe not found. Office may not be installed yet." -Level 'WARNING' -Section "Office Installation"
+            }
+            
+            $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+            if ($teamsPath) {
+                Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+            } else {
+                $script:WarningCount++
+                Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
+            }
         }
-        
-        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
-        if ($teamsPath) {
-            Start-Process ms-teams.exe -ErrorAction SilentlyContinue
-        } else {
-            $script:WarningCount++
-            Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
-        }
-    }
+    }  # End of else block for Office DSC configuration
+    
     End-Section "Office Installation"
     # Ending office workload
     # ---------------
