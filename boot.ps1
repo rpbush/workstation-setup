@@ -1148,40 +1148,57 @@ else {
         Write-Log "net use command output: $mapOutput" -Level 'INFO' -Section "Network Drive Mapping"
         
         if ($mapExitCode -eq 0) {
-            # Wait a moment for the mapping to register
-            Start-Sleep -Seconds 2
+            # Wait longer for the mapping to register and become accessible
+            Start-Sleep -Seconds 3
             
-            # Check if drive shows up in net use list first
-            $netUseList = net use 2>&1 | Out-String
-            $driveInList = $netUseList -match $nDrive
-            
-            if ($driveInList) {
-                Write-Log "Drive $nDrive appears in net use list" -Level 'INFO' -Section "Network Drive Mapping"
+            # Verify the mapping multiple times to ensure it's actually working and persistent
+            $verified = $false
+            $maxRetries = 5
+            for ($retry = 1; $retry -le $maxRetries; $retry++) {
+                # Check if drive shows up in net use list
+                $netUseList = net use 2>&1 | Out-String
+                $driveInList = $netUseList -match [regex]::Escape($nDrive)
                 
+                if ($driveInList) {
+                    # Try to access the drive
+                    $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
+                    if ($testPath) {
+                        # Double-check it's actually accessible by trying to list contents
+                        try {
+                            $items = Get-ChildItem $nDrive -ErrorAction Stop | Select-Object -First 1
+                            $verified = $true
+                            Write-Log "Drive $nDrive verified and accessible (attempt $retry of $maxRetries)" -Level 'INFO' -Section "Network Drive Mapping"
+                            break
+                        } catch {
+                            Write-Log "Drive $nDrive exists but not accessible (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                            Start-Sleep -Seconds 2
+                        }
+                    } else {
+                        Write-Log "Drive $nDrive in net use list but not accessible via Test-Path (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 2
+                    }
+                } else {
+                    Write-Log "Drive $nDrive not in net use list yet (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                    Start-Sleep -Seconds 2
+                }
+            }
+            
+            if ($verified) {
                 # Try to refresh Explorer to show the drive
                 try {
-                    # Refresh Explorer to show new network drives
                     $shell = New-Object -ComObject Shell.Application
                     $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -eq "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" } | ForEach-Object { $_.Refresh() }
                 } catch {
                     # Explorer refresh failed, but continue
                 }
                 
-                # Verify the mapping actually works by trying to access it
-                $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
-                if ($testPath) {
-                    Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                } else {
-                    $script:WarningCount++
-                    Write-Log "Drive $nDrive is mapped but not accessible via Test-Path. It may appear in File Explorer after refresh." -Level 'WARNING' -Section "Network Drive Mapping"
-                    Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                    Write-Log "Note: You may need to refresh File Explorer (F5) or restart Explorer to see the drive" -Level 'WARNING' -Section "Network Drive Mapping"
-                }
+                Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded (exit code 0) but drive does not appear in net use list: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
-                Write-Log "This may indicate the NFS server is not accessible or the path is incorrect" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Drive $nDrive mapping command succeeded but drive is not accessible after $maxRetries attempts" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Current net use output: $(net use 2>&1 | Out-String)" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Note: The drive may not be accessible from this session. The mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
             }
         } else {
             $script:ErrorCount++
@@ -1408,41 +1425,57 @@ else {
         }
         
         if ($mapExitCode -eq 0) {
-            # Wait a moment for the mapping to register
-            Start-Sleep -Seconds 2
+            # Wait longer for the mapping to register and become accessible
+            Start-Sleep -Seconds 3
             
-            # Check if drive shows up in net use list first
-            $netUseList = net use 2>&1 | Out-String
-            $driveInList = $netUseList -match $sDrive
-            
-            if ($driveInList) {
-                Write-Log "Drive $sDrive appears in net use list" -Level 'INFO' -Section "Network Drive Mapping"
+            # Verify the mapping multiple times to ensure it's actually working and persistent
+            $verified = $false
+            $maxRetries = 5
+            for ($retry = 1; $retry -le $maxRetries; $retry++) {
+                # Check if drive shows up in net use list
+                $netUseList = net use 2>&1 | Out-String
+                $driveInList = $netUseList -match [regex]::Escape($sDrive)
                 
+                if ($driveInList) {
+                    # Try to access the drive
+                    $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
+                    if ($testPath) {
+                        # Double-check it's actually accessible by trying to list contents
+                        try {
+                            $items = Get-ChildItem $sDrive -ErrorAction Stop | Select-Object -First 1
+                            $verified = $true
+                            Write-Log "Drive $sDrive verified and accessible (attempt $retry of $maxRetries)" -Level 'INFO' -Section "Network Drive Mapping"
+                            break
+                        } catch {
+                            Write-Log "Drive $sDrive exists but not accessible (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                            Start-Sleep -Seconds 2
+                        }
+                    } else {
+                        Write-Log "Drive $sDrive in net use list but not accessible via Test-Path (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 2
+                    }
+                } else {
+                    Write-Log "Drive $sDrive not in net use list yet (attempt $retry of $maxRetries), waiting..." -Level 'INFO' -Section "Network Drive Mapping"
+                    Start-Sleep -Seconds 2
+                }
+            }
+            
+            if ($verified) {
                 # Try to refresh Explorer to show the drive
                 try {
-                    # Refresh Explorer to show new network drives
                     $shell = New-Object -ComObject Shell.Application
                     $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -eq "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" } | ForEach-Object { $_.Refresh() }
                 } catch {
                     # Explorer refresh failed, but continue
                 }
                 
-                # Verify the mapping actually works by trying to access it
-                $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
-                if ($testPath) {
-                    Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                } else {
-                    $script:WarningCount++
-                    Write-Log "Drive $sDrive is mapped but not accessible via Test-Path. It may appear in File Explorer after refresh." -Level 'WARNING' -Section "Network Drive Mapping"
-                    Write-Log "This may indicate authentication issues or the share is not accessible" -Level 'WARNING' -Section "Network Drive Mapping"
-                    Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                    Write-Log "Note: You may need to refresh File Explorer (F5) or restart Explorer to see the drive" -Level 'WARNING' -Section "Network Drive Mapping"
-                }
+                Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
             } else {
                 $script:WarningCount++
-                Write-Log "Mapping command succeeded (exit code 0) but drive does not appear in net use list: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
-                Write-Log "This may indicate authentication issues or the share is not accessible" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Drive $sDrive mapping command succeeded but drive is not accessible after $maxRetries attempts" -Level 'WARNING' -Section "Network Drive Mapping"
                 Write-Log "Full output: $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Current net use output: $(net use 2>&1 | Out-String)" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Note: The drive may not be accessible from this session. The mapping may have failed silently." -Level 'WARNING' -Section "Network Drive Mapping"
             }
         } else {
             $script:ErrorCount++
@@ -1711,14 +1744,22 @@ else {
         }
         
         $newDscContent = @()
-        $skipDevDrive = $false
         $inDevDriveResource = $false
         $devDriveResourceStart = -1
         
         Write-Log "Processing $($dscLines.Count) lines to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
         
         $devDriveFound = $false
+        $loopCount = 0
+        $maxLoopIterations = $dscLines.Count * 2  # Safety limit to prevent infinite loops
+        
         for ($i = 0; $i -lt $dscLines.Count; $i++) {
+            $loopCount++
+            if ($loopCount -gt $maxLoopIterations) {
+                Write-Log "ERROR: Processing loop exceeded safety limit. Breaking to prevent infinite loop." -Level 'ERROR' -Section "Dev Flows Installation"
+                break
+            }
+            
             $line = $dscLines[$i]
             
             # Progress indicator every 50 lines
@@ -1727,7 +1768,7 @@ else {
             }
             
             # Detect start of Dev Drive resource block
-            if ($line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
+            if (-not $inDevDriveResource -and $line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
                 # Check if next line or nearby has "id: DevDrive1"
                 $checkAhead = [Math]::Min(5, $dscLines.Count - $i - 1)
                 for ($k = 1; $k -le $checkAhead; $k++) {
@@ -1736,8 +1777,8 @@ else {
                         $devDriveFound = $true
                         $inDevDriveResource = $true
                         $devDriveResourceStart = $i
-                        # Skip this resource block
-                        break
+                        # Skip this resource block - don't add this line
+                        continue
                     }
                 }
             }
@@ -1748,6 +1789,7 @@ else {
                 if ($line -match '^\s+-\s+resource:' -and $i -gt $devDriveResourceStart) {
                     # We've reached the next resource, stop skipping
                     $inDevDriveResource = $false
+                    Write-Log "Reached next resource at line $($i+1), ending Dev Drive resource removal" -Level 'INFO' -Section "Dev Flows Installation"
                     $newDscContent += $line
                 }
                 # Otherwise, skip this line (don't add it to new content)
