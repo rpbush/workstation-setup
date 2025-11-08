@@ -916,7 +916,7 @@ else {
     Write-Host "Done: Setting system tray to show all icons"
     # ---------------
     # Mapping network drives
-    Write-Host "Start: Mapping network drives"
+    Start-Section "Network Drive Mapping"
     try {
         # NFS Client feature installation moved to start of script (may require reboot)
         # Windows Sandbox feature installation moved to Windows Features section
@@ -924,34 +924,83 @@ else {
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
         $nPath = "NFS:/media"
-        Write-Host "Mapping $nDrive to $nPath"
+        Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
+        
         # Remove existing mapping if it exists
-        net use $nDrive /delete /yes 2>$null
+        $deleteResult = net use $nDrive /delete /yes 2>&1
+        if ($LASTEXITCODE -eq 0 -or $deleteResult -match "not found" -or $deleteResult -match "not exist") {
+            Write-Log "Removed existing mapping for $nDrive (if it existed)" -Level 'INFO' -Section "Network Drive Mapping"
+        }
+        
         # Create persistent mapping
-        net use $nDrive $nPath /persistent:yes | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully mapped $nDrive to $nPath"
+        Write-Log "Creating NFS mapping..." -Level 'INFO' -Section "Network Drive Mapping"
+        $mapResult = net use $nDrive $nPath /persistent:yes 2>&1
+        $mapExitCode = $LASTEXITCODE
+        
+        if ($mapExitCode -eq 0) {
+            # Verify the mapping actually works
+            $testPath = Test-Path $nDrive -ErrorAction SilentlyContinue
+            if ($testPath) {
+                Write-Log "Successfully mapped $nDrive to $nPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+            } else {
+                $script:WarningCount++
+                Write-Log "Mapping command succeeded but drive is not accessible: $nDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Output: $($mapResult -join ' | ')" -Level 'WARNING' -Section "Network Drive Mapping"
+            }
         } else {
-            Write-Warning "Failed to map $nDrive to $nPath (may not be available yet)"
+            $script:ErrorCount++
+            Write-Log "Failed to map $nDrive to $nPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Error output: $($mapResult -join ' | ')" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Note: NFS mapping may require the NFS server to be accessible and NFS Client service to be running" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # Map S: drive to \\FS-1\Storage (Windows Network)
         $sDrive = "S:"
         $sPath = "\\FS-1\Storage"
-        Write-Host "Mapping $sDrive to $sPath"
+        Write-Log "Attempting to map $sDrive to $sPath" -Level 'INFO' -Section "Network Drive Mapping"
+        
         # Remove existing mapping if it exists
-        net use $sDrive /delete /yes 2>$null
-        # Create persistent mapping
-        net use $sDrive $sPath /persistent:yes | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully mapped $sDrive to $sPath"
-        } else {
-            Write-Warning "Failed to map $sDrive to $sPath (may not be available yet)"
+        $deleteResult = net use $sDrive /delete /yes 2>&1
+        if ($LASTEXITCODE -eq 0 -or $deleteResult -match "not found" -or $deleteResult -match "not exist") {
+            Write-Log "Removed existing mapping for $sDrive (if it existed)" -Level 'INFO' -Section "Network Drive Mapping"
         }
+        
+        # Create persistent mapping
+        Write-Log "Creating Windows network mapping..." -Level 'INFO' -Section "Network Drive Mapping"
+        $mapResult = net use $sDrive $sPath /persistent:yes 2>&1
+        $mapExitCode = $LASTEXITCODE
+        
+        if ($mapExitCode -eq 0) {
+            # Verify the mapping actually works
+            $testPath = Test-Path $sDrive -ErrorAction SilentlyContinue
+            if ($testPath) {
+                Write-Log "Successfully mapped $sDrive to $sPath and verified access" -Level 'SUCCESS' -Section "Network Drive Mapping"
+            } else {
+                $script:WarningCount++
+                Write-Log "Mapping command succeeded but drive is not accessible: $sDrive" -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "Output: $($mapResult -join ' | ')" -Level 'WARNING' -Section "Network Drive Mapping"
+            }
+        } else {
+            $script:ErrorCount++
+            Write-Log "Failed to map $sDrive to $sPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Error output: $($mapResult -join ' | ')" -Level 'ERROR' -Section "Network Drive Mapping"
+            Write-Log "Note: Windows network mapping may require network connectivity and proper credentials" -Level 'WARNING' -Section "Network Drive Mapping"
+        }
+        
+        # List all mapped drives for verification
+        Write-Log "Current mapped network drives:" -Level 'INFO' -Section "Network Drive Mapping"
+        $mappedDrives = net use 2>&1
+        foreach ($line in $mappedDrives) {
+            if ($line -match "^\s+\w:") {
+                Write-Log "  $line" -Level 'INFO' -Section "Network Drive Mapping"
+            }
+        }
+        
     } catch {
-        Write-Warning "Failed to map network drives: $_"
+        $script:ErrorCount++
+        Write-Log "Exception during network drive mapping" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
     }
-    Write-Host "Done: Mapping network drives"
+    End-Section "Network Drive Mapping"
     # ---------------
     # Installing Windows Terminal
     # Reference: https://learn.microsoft.com/en-us/windows/terminal/
