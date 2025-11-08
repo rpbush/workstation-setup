@@ -209,6 +209,9 @@ $isWinGetRecent = $null
 # Function to check if WinGet is available and get version
 function Test-WinGetInstalled {
     try {
+        # Refresh PATH to ensure winget is available if recently installed
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
         # Use --info for better compatibility (recommended by Microsoft docs)
         $wingetInfo = winget --info 2>$null
         if ($wingetInfo) {
@@ -219,21 +222,24 @@ function Test-WinGetInstalled {
                     Installed = $true
                     Version = $wingetVersion
                     VersionArray = $wingetVersion.Trim('v').TrimEnd("-preview").split('.')
+                    Working = $true
                 }
             }
         }
     } catch {
-        # WinGet not available
+        # WinGet command not available, but package might be installed
     }
     
-    # Also check if App Installer package is installed (which includes WinGet)
+    # Check if App Installer package is installed (which includes WinGet)
     $appInstaller = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
     if ($appInstaller) {
+        # If package is installed but command doesn't work, it might need a refresh or restart
         return @{
             Installed = $true
-            Version = $null
+            Version = $appInstaller.Version
             VersionArray = $null
             AppInstallerInstalled = $true
+            Working = $false  # Command not working, may need refresh
         }
     }
     
@@ -241,15 +247,37 @@ function Test-WinGetInstalled {
         Installed = $false
         Version = $null
         VersionArray = $null
+        Working = $false
     }
 }
 
 $wingetStatus = Test-WinGetInstalled
 $wingetInstalled = $wingetStatus.Installed
 $isWinGetRecent = $wingetStatus.VersionArray
+$wingetWorking = $wingetStatus.Working
 
-# forcing WinGet to be installed if not present or version is too old
-if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
+# If WinGet package is installed but command doesn't work, try refreshing PATH and testing again
+if ($wingetInstalled -and -not $wingetWorking) {
+    Write-Log "WinGet package detected but command not available. Refreshing environment..." -Level 'WARNING' -Section "WinGet Bootstrap"
+    # Refresh PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    Start-Sleep -Seconds 2
+    
+    # Test again
+    $wingetStatus = Test-WinGetInstalled
+    $wingetInstalled = $wingetStatus.Installed
+    $isWinGetRecent = $wingetStatus.VersionArray
+    $wingetWorking = $wingetStatus.Working
+    
+    if ($wingetWorking) {
+        Write-Log "WinGet is now working after PATH refresh" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+    } else {
+        Write-Log "WinGet package installed but command still not available. May need PowerShell restart." -Level 'WARNING' -Section "WinGet Bootstrap"
+    }
+}
+
+# forcing WinGet to be installed if not present, not working, or version is too old
+if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
 {
    Write-Host "Downloading WinGet and its dependencies..."
    
@@ -406,13 +434,35 @@ if (-not $wingetInstalled -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0
    $wingetInstalledSuccessfully = $false
    $wingetBundleIndex = $paths.Count - 1
    if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
-       Write-Host "Installing: Microsoft.DesktopAppInstaller (WinGet)"
+       Write-Log "Installing: Microsoft.DesktopAppInstaller (WinGet)" -Level 'INFO' -Section "WinGet Bootstrap"
        try {
            Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
-           Write-Host "WinGet installed successfully"
+           Write-Log "WinGet installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
            $wingetInstalledSuccessfully = $true
        } catch {
-           Write-Warning "WinGet installation failed: $_"
+           $errorMessage = $_.Exception.Message
+           Write-Log "WinGet installation failed: $errorMessage" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+           
+           # Check for specific "package in use" error (0x80073D02)
+           if ($errorMessage -match "0x80073D02" -or $errorMessage -match "resources it modifies are currently in use") {
+               Write-Log "WinGet package is already installed but may be in use. Checking if WinGet command works..." -Level 'WARNING' -Section "WinGet Bootstrap"
+               
+               # Refresh PATH and test if WinGet works now
+               $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+               Start-Sleep -Seconds 2
+               
+               try {
+                   $wingetTest = winget --info 2>$null
+                   if ($wingetTest) {
+                       Write-Log "WinGet is actually working! The installation error was a false alarm." -Level 'SUCCESS' -Section "WinGet Bootstrap"
+                       $wingetInstalledSuccessfully = $true
+                   } else {
+                       Write-Log "WinGet package exists but command not available. May need to close App Installer processes or restart PowerShell." -Level 'WARNING' -Section "WinGet Bootstrap"
+                   }
+               } catch {
+                   Write-Log "WinGet command still not available after PATH refresh" -Level 'WARNING' -Section "WinGet Bootstrap"
+               }
+           }
        }
    }
    
