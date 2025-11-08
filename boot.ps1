@@ -1714,11 +1714,21 @@ else {
         $skipDevDrive = $false
         $devDriveIndent = 0
         
+        Write-Log "Processing $($dscLines.Count) lines to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
+        
+        $devDriveFound = $false
         for ($i = 0; $i -lt $dscLines.Count; $i++) {
             $line = $dscLines[$i]
             
+            # Progress indicator every 50 lines
+            if ($i -gt 0 -and $i % 50 -eq 0) {
+                Write-Log "Processing line $i of $($dscLines.Count)..." -Level 'INFO' -Section "Dev Flows Installation"
+            }
+            
             # Detect start of Dev Drive resource (look for "id: DevDrive1")
             if ($line -match '^\s+id:\s+DevDrive1') {
+                Write-Log "Found Dev Drive resource at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
+                $devDriveFound = $true
                 $skipDevDrive = $true
                 if ($line -match '^(\s+)') {
                     $devDriveIndent = $matches[1].Length
@@ -1754,7 +1764,9 @@ else {
             $newDscContent += $line
         }
         
-        if ($newDscContent.Count -lt $dscLines.Count) {
+        Write-Log "DSC file processing complete. Original: $($dscLines.Count) lines, New: $($newDscContent.Count) lines" -Level 'INFO' -Section "Dev Flows Installation"
+        
+        if ($devDriveFound -and $newDscContent.Count -lt $dscLines.Count) {
             Write-Log "Removing Dev Drive resource from DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
             try {
                 Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n") -ErrorAction Stop
