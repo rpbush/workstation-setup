@@ -2003,7 +2003,7 @@ else {
         Write-Host "This is non-critical - the script has completed successfully"
     }
     Write-Host "Done: Upgrading WinGet to Microsoft Store version"
-}
+}  # End of else block (admin section)
 
 # Final Summary
 $scriptEndTime = Get-Date
