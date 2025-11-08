@@ -2,6 +2,79 @@ $mypath = $MyInvocation.MyCommand.Path
 Write-Output "Path of the script: $mypath"
 Write-Output "Args for script: $Args"
 
+# Initialize logging system
+$scriptDir = Split-Path $mypath -Parent
+$logFileName = "workstation-setup-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+$logFilePath = Join-Path $scriptDir $logFileName
+$scriptStartTime = Get-Date
+$sectionStartTimes = @{}
+
+# Logging function
+function Write-Log {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+        [Parameter(Mandatory=$false)]
+        [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS', 'SECTION_START', 'SECTION_END')]
+        [string]$Level = 'INFO',
+        [Parameter(Mandatory=$false)]
+        [Exception]$Exception = $null,
+        [Parameter(Mandatory=$false)]
+        [string]$Section = ''
+    )
+    
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+    $logEntry = "[$timestamp] [$Level]"
+    
+    if ($Section) {
+        $logEntry += " [$Section]"
+    }
+    
+    $logEntry += " $Message"
+    
+    # Add exception details if provided
+    if ($Exception) {
+        $logEntry += " | Exception: $($Exception.GetType().FullName)"
+        $logEntry += " | Message: $($Exception.Message)"
+        if ($Exception.StackTrace) {
+            $logEntry += " | StackTrace: $($Exception.StackTrace -replace "`r?`n", " | ")"
+        }
+        if ($Exception.InnerException) {
+            $logEntry += " | InnerException: $($Exception.InnerException.Message)"
+        }
+    }
+    
+    # Write to log file
+    try {
+        Add-Content -Path $logFilePath -Value $logEntry -ErrorAction SilentlyContinue
+    } catch {
+        # If logging fails, at least try to write to console
+        Write-Host "Logging failed: $_" -ForegroundColor Red
+    }
+    
+    # Also write to console with appropriate color
+    switch ($Level) {
+        'ERROR' { Write-Host $Message -ForegroundColor Red }
+        'WARNING' { Write-Warning $Message }
+        'SUCCESS' { Write-Host $Message -ForegroundColor Green }
+        'SECTION_START' { Write-Host $Message -ForegroundColor Cyan }
+        'SECTION_END' { Write-Host $Message -ForegroundColor Cyan }
+        default { Write-Host $Message }
+    }
+}
+
+# Log script start
+Write-Log "========================================" -Level 'INFO'
+Write-Log "Workstation Setup Script Started" -Level 'SECTION_START'
+Write-Log "Script Path: $mypath" -Level 'INFO'
+Write-Log "Script Arguments: $($Args -join ' ')" -Level 'INFO'
+Write-Log "Log File: $logFilePath" -Level 'INFO'
+Write-Log "PowerShell Version: $($PSVersionTable.PSVersion)" -Level 'INFO'
+Write-Log "OS Version: $([System.Environment]::OSVersion.VersionString)" -Level 'INFO'
+Write-Log "Computer Name: $($env:COMPUTERNAME)" -Level 'INFO'
+Write-Log "User: $($env:USERNAME)" -Level 'INFO'
+Write-Log "========================================" -Level 'INFO'
+
 # turning off progress bar to make invoke WebRequest fast
 $ProgressPreference = 'SilentlyContinue'
 
@@ -9,32 +82,71 @@ $ProgressPreference = 'SilentlyContinue'
 $ConfirmPreference = 'None'
 $ErrorActionPreference = 'Continue'
 
+# Track errors globally
+$script:ErrorCount = 0
+$script:WarningCount = 0
+$script:SectionTimings = @{}
+
+# Section timing helper functions
+function Start-Section {
+    param([string]$SectionName)
+    $script:SectionTimings[$SectionName] = @{
+        StartTime = Get-Date
+        EndTime = $null
+        Duration = $null
+    }
+    Write-Log "Starting section: $SectionName" -Level 'SECTION_START' -Section $SectionName
+}
+
+function End-Section {
+    param([string]$SectionName)
+    if ($script:SectionTimings.ContainsKey($SectionName)) {
+        $script:SectionTimings[$SectionName].EndTime = Get-Date
+        $duration = $script:SectionTimings[$SectionName].EndTime - $script:SectionTimings[$SectionName].StartTime
+        $script:SectionTimings[$SectionName].Duration = $duration
+        Write-Log "Completed section: $SectionName (Duration: $($duration.TotalSeconds.ToString('F2')) seconds)" -Level 'SECTION_END' -Section $SectionName
+    }
+}
+
 # Bootstrap WinGet using PowerShell module (works in Windows Sandbox and other environments)
 # Method from official WinGet documentation: https://learn.microsoft.com/en-us/windows/package-manager/
-Write-Host "Installing WinGet PowerShell module from PSGallery..."
+Start-Section "WinGet Bootstrap"
+Write-Log "Installing WinGet PowerShell module from PSGallery..." -Level 'INFO' -Section "WinGet Bootstrap"
 
 # Install NuGet package provider (method from WinGet documentation)
-Install-PackageProvider -Name NuGet -Force | Out-Null
+try {
+    Install-PackageProvider -Name NuGet -Force -ErrorAction Stop | Out-Null
+    Write-Log "NuGet package provider installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+} catch {
+    $script:ErrorCount++
+    Write-Log "Failed to install NuGet package provider" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+}
 
 # Install Microsoft.WinGet.Client module (method from WinGet documentation)
-Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
+try {
+    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -ErrorAction Stop | Out-Null
+    Write-Log "Microsoft.WinGet.Client module installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+} catch {
+    $script:ErrorCount++
+    Write-Log "Failed to install Microsoft.WinGet.Client module" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+}
 
-Write-Host "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..."
+Write-Log "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..." -Level 'INFO' -Section "WinGet Bootstrap"
 
 # Bootstrap WinGet using the PowerShell module (method from WinGet documentation)
 try {
     Repair-WinGetPackageManager -AllUsers -ErrorAction Stop
-    Write-Host "WinGet bootstrapped successfully via PowerShell module"
+    Write-Log "WinGet bootstrapped successfully via PowerShell module" -Level 'SUCCESS' -Section "WinGet Bootstrap"
 } catch {
-    Write-Warning "Repair-WinGetPackageManager failed: $_"
-    Write-Host "Will continue with manual WinGet installation..."
+    $script:WarningCount++
+    Write-Log "Repair-WinGetPackageManager failed, will continue with manual installation" -Level 'WARNING' -Section "WinGet Bootstrap" -Exception $_
 }
 
-Write-Host "Done bootstrapping WinGet."
+End-Section "WinGet Bootstrap"
 
 # ---------------
 # Installing NFS Client feature (moved to start as it may require reboot)
-Write-Host "Start: Installing NFS Client feature"
+Start-Section "NFS Client Installation"
 $nfsNeedsReboot = $false
 try {
     # Try different feature names depending on Windows version
@@ -82,9 +194,10 @@ try {
         }
     }
 } catch {
-    Write-Warning "Failed to install NFS Client feature: $_"
+    $script:ErrorCount++
+    Write-Log "Failed to install NFS Client feature" -Level 'ERROR' -Section "NFS Client Installation" -Exception $_
 }
-Write-Host "Done: Installing NFS Client feature"
+End-Section "NFS Client Installation"
 # ---------------
 
 # Check if WinGet is installed and get version
@@ -439,7 +552,7 @@ else {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-$dscUri = "https://github.com/rpbush/New_Computer_Setup/blob/main/"
+$dscUri = "https://raw.githubusercontent.com/rpbush/New_Computer_Setup/main/"
 $dscNonAdmin = "rpbush.nonAdmin.dsc.yml";
 $dscAdmin = "rpbush.dev.dsc.yml";
 $dscOffice = "rpbush.office.dsc.yml";
@@ -454,9 +567,40 @@ if (!$isAdmin) {
    # Shoulder tap terminal to it gets registered moving foward
    Start-Process shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App
 
-   Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin 
-   # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
-   winget configuration -f $dscNonAdmin --accept-configuration-agreements 
+   Start-Section "NonAdmin DSC Installation"
+   $nonAdminDscDownloaded = $false
+   try {
+       Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
+       $downloadStart = Get-Date
+       Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
+       $downloadDuration = (Get-Date) - $downloadStart
+       Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+       $nonAdminDscDownloaded = $true
+   } catch {
+       $script:ErrorCount++
+       Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
+       Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+   }
+   
+   if ($nonAdminDscDownloaded) {
+       try {
+           Write-Log "Running winget configuration for NonAdmin DSC" -Level 'INFO' -Section "NonAdmin DSC Installation"
+           $configStart = Get-Date
+           $configOutput = winget configuration -f $dscNonAdmin --accept-configuration-agreements 2>&1
+           $configDuration = (Get-Date) - $configStart
+           if ($LASTEXITCODE -eq 0) {
+               Write-Log "NonAdmin DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+           } else {
+               $script:ErrorCount++
+               Write-Log "NonAdmin DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "NonAdmin DSC Installation"
+               Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "NonAdmin DSC Installation"
+           }
+       } catch {
+           $script:ErrorCount++
+           Write-Log "Exception during NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
+       }
+   }
+   End-Section "NonAdmin DSC Installation"
    
    # clean up, Clean up, everyone wants to clean up
    if (Test-Path $dscNonAdmin) {
@@ -870,19 +1014,38 @@ else {
 
     gpupdate /force
 
+    Start-Section "Office Installation"
     $officeDscDownloaded = $false
     try {
+        Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
+        $downloadStart = Get-Date
         Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+        $downloadDuration = (Get-Date) - $downloadStart
+        Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
         $officeDscDownloaded = $true
     } catch {
-        Write-Warning "Failed to download Office DSC configuration: $_"
-        Write-Host "Skipping Office installation due to download failure"
-        Write-Host "The script will continue with remaining installations..."
+        $script:ErrorCount++
+        Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+        Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
     }
     
     if ($officeDscDownloaded) {
-        # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
-        winget configuration -f $dscOffice --accept-configuration-agreements 
+        try {
+            Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
+            $configStart = Get-Date
+            $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
+            $configDuration = (Get-Date) - $configStart
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+            } else {
+                $script:ErrorCount++
+                Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
+                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+            }
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+        } 
         
         if (Test-Path $dscOffice) {
             Remove-Item $dscOffice -verbose
@@ -892,60 +1055,26 @@ else {
         $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
         if ($outlookPath) {
             Start-Process outlook.exe -ErrorAction SilentlyContinue
+            Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
         } else {
-            Write-Warning "Outlook.exe not found. Office may not be installed yet."
+            $script:WarningCount++
+            Write-Log "Outlook.exe not found. Office may not be installed yet." -Level 'WARNING' -Section "Office Installation"
         }
         
         $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
         if ($teamsPath) {
             Start-Process ms-teams.exe -ErrorAction SilentlyContinue
         } else {
-            Write-Warning "ms-teams.exe not found. Teams may not be installed yet."
+            $script:WarningCount++
+            Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
         }
     }
-    Write-Host "Done: Office install"
+    End-Section "Office Installation"
     # Ending office workload
     # ---------------
-   # Forcing Windows Update -- goal is move to dsc
-   Write-Host "Start: Windows Update"
-   try {
-        # Check if Windows Update service is available
-        $wuService = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
-        if (-not $wuService) {
-            Write-Warning "Windows Update service not available. Skipping Windows Update."
-            Write-Host "Done: Windows Update (skipped)"
-            return
-        }
-        
-        $UpdateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
-        $Searcher = New-Object -ComObject Microsoft.Update.Searcher
-        $Session = New-Object -ComObject Microsoft.Update.Session
-        $Installer = New-Object -ComObject Microsoft.Update.Installer
- 
-        $Searcher.ServerSelection = 2
- 
-        $Result = $Searcher.Search("IsInstalled=0 and IsHidden=0")
-        
-        if ($Result -and $Result.Updates -and $Result.Updates.Count -gt 0) {
-            $Downloader = $Session.CreateUpdateDownloader()
-            $Downloader.Updates = $Result.Updates
-            $Downloader.Download()
- 
-            $Installer.Updates = $Result.Updates
-            $Installer.Install()
-            Write-Host "Windows Update completed successfully"
-        } else {
-            Write-Host "No updates available or update search returned no results"
-        }
-   } catch {
-        Write-Warning "Windows Update failed: $_"
-        Write-Host "This may be normal if Windows Update service is not available or there are no updates"
-   }
-   Write-Host "Done: Windows Update"
-    # Forcing Windows Update complete 
 
     # Staring dev workload
-    Write-Host "Start: Dev flows install"
+    Start-Section "Dev Flows Installation"
     
     # Check if a second physical drive already exists (skip dev drive creation if it does)
     $physicalDrives = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' } | Sort-Object DeviceID
@@ -953,13 +1082,17 @@ else {
     
     if ($secondDriveExists) {
         Write-Host "Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation from C: drive."
-        Write-Host "Downloading DSC configuration..."
+        Write-Log "Downloading Dev flows DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
         try {
+            $downloadStart = Get-Date
             Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+            $downloadDuration = (Get-Date) - $downloadStart
+            Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
         } catch {
-            Write-Warning "Failed to download Dev flows DSC configuration: $_"
-            Write-Host "Skipping Dev flows installation due to download failure"
-            Write-Host "Done: Dev flows install (skipped)"
+            $script:ErrorCount++
+            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+            End-Section "Dev Flows Installation"
             return
         }
         
@@ -1017,29 +1150,64 @@ else {
             Write-Host "Dev Drive resource not found in DSC file (may have already been removed)"
         }
     } else {
-        Write-Host "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive."
+        Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
         try {
+            Write-Log "Downloading Dev flows DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
+            $downloadStart = Get-Date
             Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
+            $downloadDuration = (Get-Date) - $downloadStart
+            Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
         } catch {
-            Write-Warning "Failed to download Dev flows DSC configuration: $_"
-            Write-Host "Skipping Dev flows installation due to download failure"
-            Write-Host "Done: Dev flows install (skipped)"
+            $script:ErrorCount++
+            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+            End-Section "Dev Flows Installation"
             return
         }
     }
     
     # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
-    winget configuration -f $dscAdmin --accept-configuration-agreements
+    try {
+        Write-Log "Running winget configuration for Dev flows DSC" -Level 'INFO' -Section "Dev Flows Installation"
+        $configStart = Get-Date
+        $configOutput = winget configuration -f $dscAdmin --accept-configuration-agreements 2>&1
+        $configDuration = (Get-Date) - $configStart
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Dev flows DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+        } else {
+            $script:ErrorCount++
+            Write-Log "Dev flows DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Dev Flows Installation"
+            Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Dev Flows Installation"
+        }
+    } catch {
+        $script:ErrorCount++
+        Write-Log "Exception during Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+    }
 
-    Write-Host "Start: PowerToys dsc install"
-    # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
-    winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements # no cleanup needed as this is intentionally local
+    Start-Section "PowerToys Installation"
+    try {
+        Write-Log "Running winget configuration for PowerToys Enterprise DSC" -Level 'INFO' -Section "PowerToys Installation"
+        $configStart = Get-Date
+        $configOutput = winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements 2>&1
+        $configDuration = (Get-Date) - $configStart
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "PowerToys DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "PowerToys Installation"
+        } else {
+            $script:ErrorCount++
+            Write-Log "PowerToys DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "PowerToys Installation"
+            Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "PowerToys Installation"
+        }
+    } catch {
+        $script:ErrorCount++
+        Write-Log "Exception during PowerToys DSC configuration" -Level 'ERROR' -Section "PowerToys Installation" -Exception $_
+    }
+    End-Section "PowerToys Installation"
    
     # clean up, Clean up, everyone wants to clean up
     if (Test-Path $dscAdmin) {
         Remove-Item $dscAdmin -verbose
     }
-    Write-Host "Done: Dev flows install"
+    End-Section "Dev Flows Installation"
     # ending dev workload
     
     # Setting PowerShell 7 as default in Windows Terminal
@@ -1147,3 +1315,29 @@ else {
     }
     Write-Host "Done: Upgrading WinGet to Microsoft Store version"
 }
+
+# Final Summary
+$scriptEndTime = Get-Date
+$totalDuration = $scriptEndTime - $scriptStartTime
+
+Write-Log "========================================" -Level 'INFO'
+Write-Log "Workstation Setup Script Completed" -Level 'SECTION_END'
+Write-Log "========================================" -Level 'INFO'
+Write-Log "Total Execution Time: $($totalDuration.TotalMinutes.ToString('F2')) minutes ($($totalDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'INFO'
+Write-Log "Total Errors: $script:ErrorCount" -Level $(if ($script:ErrorCount -gt 0) { 'ERROR' } else { 'SUCCESS' })
+Write-Log "Total Warnings: $script:WarningCount" -Level $(if ($script:WarningCount -gt 0) { 'WARNING' } else { 'INFO' })
+Write-Log "Log File Location: $logFilePath" -Level 'INFO'
+Write-Log "========================================" -Level 'INFO'
+
+# Section Timing Summary
+Write-Log "Section Timing Summary:" -Level 'INFO'
+foreach ($section in $script:SectionTimings.Keys | Sort-Object) {
+    $timing = $script:SectionTimings[$section]
+    if ($timing.Duration) {
+        Write-Log "  $section : $($timing.Duration.TotalSeconds.ToString('F2')) seconds" -Level 'INFO'
+    }
+}
+
+Write-Log "========================================" -Level 'INFO'
+Write-Log "For optimization data, review the log file: $logFilePath" -Level 'INFO'
+Write-Log "========================================" -Level 'INFO'

@@ -32,7 +32,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -Ite
 
 ### Important Notes
 
-- The script will automatically download required DSC configuration files from GitHub (currently configured to download from `https://github.com/rpbush/New_Computer_Setup/blob/main/`)
+- The script will automatically download required DSC configuration files from GitHub (currently configured to download from `https://raw.githubusercontent.com/rpbush/New_Computer_Setup/main/`)
 - **Windows Activation**: The script will automatically download `MAS_AIO.cmd` from the GitHub repository if it's not found locally. Windows activation will be skipped with a warning if the download fails.
 - The script will prompt for administrator privileges when needed
 - **Network Drives**: The script maps N: (NFS:/media) and S: (\\FS-1\Storage). Modify these in `boot.ps1` if your network setup differs.
