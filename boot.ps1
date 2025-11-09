@@ -1152,179 +1152,13 @@ else {
         # NFS Client feature installation moved to start of script (may require reboot)
         # Windows Sandbox feature installation moved to Windows Features section
         
-        # Prompt for credentials at the start (used for both NFS and SMB drives)
-        # Store credentials in Windows Credential Manager for persistent use
+        # Domain-joined workstation: use logged-in user's credentials automatically
+        # No credential prompting needed - Windows will use domain authentication
         $sDrive = "S:"
         $sPath = "\\FS-1\Storage"
         $serverName = ($sPath -split '\\')[2]
-        $cmdkeyTarget = $sPath
-        $credentialsStored = $false
         
-        # Check if credentials are already stored for this path or server
-        try {
-            $cmdkeyList = cmdkey /list 2>&1 | Out-String
-            # Check for full path
-            if ($cmdkeyList -match [regex]::Escape($cmdkeyTarget)) {
-                Write-Log "Credentials already stored in credential manager for $cmdkeyTarget" -Level 'INFO' -Section "Network Drive Mapping"
-                $credentialsStored = $true
-            }
-            # Also check for server name (credentials might be stored for just the server)
-            elseif ($cmdkeyList -match [regex]::Escape($serverName)) {
-                Write-Log "Credentials found for server $serverName (may work for $cmdkeyTarget)" -Level 'INFO' -Section "Network Drive Mapping"
-                $credentialsStored = $true
-            }
-        } catch {
-            # Ignore errors checking credential store
-            Write-Log "Could not check credential store: $_" -Level 'WARNING' -Section "Network Drive Mapping"
-        }
-        
-        # If credentials are not stored, prompt user to store them
-        if (-not $credentialsStored) {
-            Write-Host ""
-            Write-Host "========================================" -ForegroundColor Cyan
-            Write-Host "Network Drive Mapping: Credentials Required" -ForegroundColor Cyan
-            Write-Host "========================================" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "Network drives require credentials to map." -ForegroundColor Yellow
-            Write-Host "Please enter your network credentials below." -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "These credentials will be:" -ForegroundColor White
-            Write-Host "  - Stored securely in Windows Credential Manager" -ForegroundColor White
-            Write-Host "  - Used for both N: (NFS) and S: (SMB) drive mappings" -ForegroundColor White
-            Write-Host "  - Persisted for future use" -ForegroundColor White
-            Write-Host ""
-            Write-Host "Server: $serverName" -ForegroundColor Cyan
-            Write-Host "Path: $sPath" -ForegroundColor Cyan
-            Write-Host ""
-            
-            try {
-                # Prompt for username first (more user-friendly)
-                Write-Host "Enter username (format: DOMAIN\username or username):" -ForegroundColor Yellow
-                $usernameInput = Read-Host "Username"
-                
-                if ([string]::IsNullOrWhiteSpace($usernameInput)) {
-                    Write-Log "Username was empty. Skipping credential storage." -Level 'WARNING' -Section "Network Drive Mapping"
-                    $script:WarningCount++
-                } else {
-                    # Prompt for password using secure string
-                    Write-Host ""
-                    Write-Host "Enter password:" -ForegroundColor Yellow
-                    $securePassword = Read-Host -AsSecureString "Password"
-                    
-                    if ($securePassword) {
-                        # Convert secure string to plain text for cmdkey (required by cmdkey)
-                        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-                        $password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-                        
-                        # Store credentials using cmdkey for SMB path
-                        Write-Log "Storing credentials in Windows Credential Manager for $cmdkeyTarget..." -Level 'INFO' -Section "Network Drive Mapping"
-                        Write-Host ""
-                        Write-Host "Storing credentials in Windows Credential Manager..." -ForegroundColor Cyan
-                        
-                        # Use Start-Process to properly capture exit code and handle special characters in password
-                        # cmdkey doesn't accept quotes around /pass parameter, so we need to pass arguments correctly
-                        try {
-                            $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-                            $processInfo.FileName = "cmdkey.exe"
-                            # Build arguments - cmdkey doesn't like quotes around /pass, so pass password directly
-                            # If username or password contains spaces, we may need to handle differently
-                            $processInfo.Arguments = "/add:$cmdkeyTarget /user:$usernameInput /pass:$password"
-                            $processInfo.UseShellExecute = $false
-                            $processInfo.RedirectStandardOutput = $true
-                            $processInfo.RedirectStandardError = $true
-                            $processInfo.CreateNoWindow = $true
-                            
-                            $process = New-Object System.Diagnostics.Process
-                            $process.StartInfo = $processInfo
-                            
-                            # Start process and capture output
-                            $process.Start() | Out-Null
-                            
-                            $stdout = $process.StandardOutput.ReadToEnd()
-                            $stderr = $process.StandardError.ReadToEnd()
-                            $process.WaitForExit()
-                            
-                            $cmdkeyExitCode = $process.ExitCode
-                            # Combine both outputs for better error reporting
-                            $cmdkeyResult = if ($stderr) { $stderr.Trim() } elseif ($stdout) { $stdout.Trim() } else { "" }
-                            
-                            # If cmdkey fails with "parameter is incorrect", try alternative method using net use
-                            if ($cmdkeyExitCode -ne 0 -and $cmdkeyResult -match "parameter is incorrect|The parameter is incorrect") {
-                                Write-Log "cmdkey failed with parameter error. Trying alternative method using net use..." -Level 'WARNING' -Section "Network Drive Mapping"
-                                
-                                # Try using net use to store credentials (this can work when cmdkey fails)
-                                try {
-                                    # Use net use with /user and /persistent to store credentials
-                                    $netUseResult = net use $cmdkeyTarget /user:$usernameInput $password 2>&1 | Out-String
-                                    $netUseSuccess = $LASTEXITCODE -eq 0
-                                    
-                                    if ($netUseSuccess) {
-                                        Write-Log "Credentials stored successfully using net use method" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                                        $cmdkeyExitCode = 0
-                                        $cmdkeyResult = "Credentials stored via net use"
-                                    } else {
-                                        Write-Log "net use method also failed: $netUseResult" -Level 'WARNING' -Section "Network Drive Mapping"
-                                    }
-                                } catch {
-                                    Write-Log "Alternative net use method failed: $_" -Level 'WARNING' -Section "Network Drive Mapping"
-                                }
-                            }
-                            
-                            if ($cmdkeyExitCode -eq 0) {
-                                Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                                Write-Host "Credentials stored successfully!" -ForegroundColor Green
-                                
-                                # Re-check to confirm credentials are stored
-                                Start-Sleep -Seconds 1
-                                $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
-                                if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
-                                    $credentialsStored = $true
-                                    Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                                } else {
-                                    Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
-                                    $credentialsStored = $true  # Assume success if cmdkey returned 0
-                                }
-                            } else {
-                                Write-Log "Failed to store credentials (Exit code: $cmdkeyExitCode). Output: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
-                                Write-Host "Failed to store credentials. Error: $cmdkeyResult" -ForegroundColor Red
-                                if ($cmdkeyResult -match "already exists") {
-                                    Write-Host "Note: Credentials may already exist. Continuing..." -ForegroundColor Yellow
-                                    $credentialsStored = $true  # If it already exists, treat as success
-                                } else {
-                                    $script:ErrorCount++
-                                }
-                            }
-                        } catch {
-                            Write-Log "Exception while storing credentials: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
-                            Write-Host "Exception while storing credentials: $_" -ForegroundColor Red
-                            $script:ErrorCount++
-                        }
-                        
-                        # Clear password from memory immediately
-                        $password = $null
-                        $securePassword = $null
-                        [System.GC]::Collect()
-                        
-                        # Store username for later use in drive mapping
-                        $username = $usernameInput
-                    } else {
-                        Write-Log "Password was empty. Skipping credential storage." -Level 'WARNING' -Section "Network Drive Mapping"
-                        $script:WarningCount++
-                    }
-                }
-            } catch {
-                Write-Log "Failed to get credentials from user: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
-                Write-Host "Error getting credentials: $_" -ForegroundColor Red
-                $script:ErrorCount++
-            }
-            
-            Write-Host ""
-        } else {
-            Write-Host ""
-            Write-Host "Using existing credentials from Windows Credential Manager" -ForegroundColor Green
-            Write-Host ""
-        }
+        Write-Log "Domain-joined workstation detected. Using logged-in user's domain credentials automatically." -Level 'INFO' -Section "Network Drive Mapping"
         
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
@@ -1364,7 +1198,7 @@ else {
         
         # Create persistent mapping
         Write-Log "Creating NFS mapping to $nPath..." -Level 'INFO' -Section "Network Drive Mapping"
-        # NFS will use stored credentials automatically if available, or try without if not needed
+        # NFS will use logged-in user's domain credentials automatically
         $mapResult = net use $nDrive $nPath /persistent:yes 2>&1
         $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
@@ -1467,49 +1301,42 @@ else {
         # Create persistent mapping
         Write-Log "Creating Windows network mapping to $sPath..." -Level 'INFO' -Section "Network Drive Mapping"
         
-        # Attempt mapping - net use will automatically use stored credentials from credential manager
+        # Attempt mapping - net use will automatically use logged-in user's domain credentials
         $mapSuccess = $false
         $mapOutput = ""
         $mapExitCode = -1
         
-        if ($credentialsStored) {
-            Write-Log "Attempting to map drive using stored credentials from credential manager..." -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Log "Attempting to map drive using logged-in user's domain credentials..." -Level 'INFO' -Section "Network Drive Mapping"
+        
+        try {
+            # Use net use - it will automatically use the logged-in user's domain credentials
+            $tempOutput = [System.IO.Path]::GetTempFileName()
+            $tempError = [System.IO.Path]::GetTempFileName()
             
-            try {
-                # Use net use - it will automatically use the stored credentials from credential manager
-                $tempOutput = [System.IO.Path]::GetTempFileName()
-                $tempError = [System.IO.Path]::GetTempFileName()
-                
-                $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
-                
-                $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-                $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
-                if ($errorOutput) {
-                    $mapOutput += "`nError: $errorOutput"
-                }
-                $mapExitCode = $process.ExitCode
-                
-                Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
-                Remove-Item $tempError -Force -ErrorAction SilentlyContinue
-                
-                if ($mapExitCode -eq 0) {
-                    $mapSuccess = $true
-                    Write-Log "net use command succeeded with stored credentials: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                } else {
-                    Write-Log "net use command failed with stored credentials (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
-                    $script:WarningCount++
-                }
-            } catch {
-                $script:ErrorCount++
-                Write-Log "Failed to map drive: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
-                $mapExitCode = -1
-                $mapOutput = "Command failed: $_"
+            $process = Start-Process -FilePath "net.exe" -ArgumentList "use", $sDrive, $sPath, "/persistent:yes" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError
+            
+            $mapOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+            $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+            if ($errorOutput) {
+                $mapOutput += "`nError: $errorOutput"
             }
-        } else {
-            Write-Log "Cannot map drive without stored credentials. Skipping $sDrive mapping." -Level 'WARNING' -Section "Network Drive Mapping"
-            $script:WarningCount++
+            $mapExitCode = $process.ExitCode
+            
+            Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+            
+            if ($mapExitCode -eq 0) {
+                $mapSuccess = $true
+                Write-Log "net use command succeeded with domain credentials: $mapOutput" -Level 'SUCCESS' -Section "Network Drive Mapping"
+            } else {
+                Write-Log "net use command failed (Exit code: $mapExitCode): $mapOutput" -Level 'WARNING' -Section "Network Drive Mapping"
+                $script:WarningCount++
+            }
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to map drive: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
             $mapExitCode = -1
-            $mapOutput = "Credentials not stored"
+            $mapOutput = "Command failed: $_"
         }
         
         if ($mapExitCode -eq 0) {
@@ -1569,7 +1396,7 @@ else {
             $script:ErrorCount++
             Write-Log "Failed to map $sDrive to $sPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
             Write-Log "Error output: $mapOutput" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Troubleshooting: Check network connectivity, server availability, share permissions, and credentials" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "Troubleshooting: Check network connectivity, server availability, and share permissions" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
         # List all mapped drives for verification
@@ -1863,7 +1690,7 @@ else {
             Write-Log "Dev Drive resource not found in DSC file (may have already been removed)" -Level 'INFO' -Section "Dev Flows Installation"
         }
     } else {
-        Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Dev Drive will be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Checking if Dev Drive can be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
         
         # Check if file exists locally first
         if (Test-Path $dscAdminLocal) {
@@ -1882,6 +1709,103 @@ else {
                 Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
                 End-Section "Dev Flows Installation"
             return
+            }
+        }
+        
+        # Check available space on C: drive for Dev Drive creation (requires 75GB)
+        try {
+            $cDrive = Get-PSDrive -Name C -ErrorAction Stop
+            $freeSpaceGB = [math]::Round($cDrive.Free / 1GB, 2)
+            $requiredSpaceGB = 75
+            Write-Log "C: drive free space: $freeSpaceGB GB (required: $requiredSpaceGB GB for Dev Drive)" -Level 'INFO' -Section "Dev Flows Installation"
+            
+            if ($freeSpaceGB -lt $requiredSpaceGB) {
+                Write-Log "Insufficient space on C: drive for Dev Drive creation. Removing Dev Drive resource from DSC configuration." -Level 'WARNING' -Section "Dev Flows Installation"
+                $removeDevDrive = $true
+            } else {
+                Write-Log "Sufficient space available on C: drive. Dev Drive will be created." -Level 'INFO' -Section "Dev Flows Installation"
+                $removeDevDrive = $false
+            }
+        } catch {
+            Write-Log "Could not check C: drive free space. Removing Dev Drive resource to avoid potential failures." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+            $removeDevDrive = $true
+        }
+        
+        # Remove Dev Drive resource from DSC file if needed
+        if ($removeDevDrive) {
+            Write-Log "Processing Dev flows DSC file to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
+            try {
+                $dscLines = Get-Content $dscAdmin -ErrorAction Stop
+                Write-Log "DSC file loaded successfully ($($dscLines.Count) lines)" -Level 'INFO' -Section "Dev Flows Installation"
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Failed to read DSC file: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                End-Section "Dev Flows Installation"
+                return
+            }
+            
+            $newDscContent = @()
+            $inDevDriveResource = $false
+            $devDriveResourceStart = -1
+            $devDriveFound = $false
+            $loopCount = 0
+            $maxLoopIterations = $dscLines.Count * 2
+            
+            for ($i = 0; $i -lt $dscLines.Count; $i++) {
+                $loopCount++
+                if ($loopCount -gt $maxLoopIterations) {
+                    Write-Log "ERROR: Processing loop exceeded safety limit. Breaking to prevent infinite loop." -Level 'ERROR' -Section "Dev Flows Installation"
+                    break
+                }
+                
+                $line = $dscLines[$i]
+                
+                # Detect start of Dev Drive resource block
+                if (-not $inDevDriveResource -and $line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
+                    # Check if next line or nearby has "id: DevDrive1"
+                    $checkAhead = [Math]::Min(5, $dscLines.Count - $i - 1)
+                    for ($k = 1; $k -le $checkAhead; $k++) {
+                        if ($dscLines[$i + $k] -match '^\s+id:\s+DevDrive1') {
+                            Write-Log "Found Dev Drive resource starting at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
+                            $devDriveFound = $true
+                            $inDevDriveResource = $true
+                            $devDriveResourceStart = $i
+                            # Skip this resource block - don't add this line
+                            continue
+                        }
+                    }
+                }
+                
+                # If we're in the Dev Drive resource, skip until we find the next resource or end of block
+                if ($inDevDriveResource) {
+                    # Check if we've reached the next resource (starts with "    - resource:")
+                    if ($line -match '^\s+-\s+resource:' -and $i -gt $devDriveResourceStart) {
+                        # We've reached the next resource, stop skipping
+                        $inDevDriveResource = $false
+                        Write-Log "Reached next resource at line $($i+1), ending Dev Drive resource removal" -Level 'INFO' -Section "Dev Flows Installation"
+                        $newDscContent += $line
+                    }
+                    # Otherwise, skip this line (don't add it to new content)
+                    continue
+                }
+                
+                # Add line if we're not skipping
+                $newDscContent += $line
+            }
+            
+            Write-Log "DSC file processing complete. Original: $($dscLines.Count) lines, New: $($newDscContent.Count) lines" -Level 'INFO' -Section "Dev Flows Installation"
+            
+            if ($devDriveFound -and $newDscContent.Count -lt $dscLines.Count) {
+                Write-Log "Removing Dev Drive resource from DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
+                try {
+                    Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n") -ErrorAction Stop
+                    Write-Log "Dev Drive resource removed from configuration (removed $($dscLines.Count - $newDscContent.Count) lines)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                } catch {
+                    $script:ErrorCount++
+                    Write-Log "Failed to write modified DSC file" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                }
+            } else {
+                Write-Log "Dev Drive resource not found in DSC file (may have already been removed)" -Level 'INFO' -Section "Dev Flows Installation"
             }
         }
     }
