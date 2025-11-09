@@ -1222,26 +1222,82 @@ else {
                         Write-Host ""
                         Write-Host "Storing credentials in Windows Credential Manager..." -ForegroundColor Cyan
                         
-                        $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$usernameInput /pass:$password 2>&1 | Out-String
-                        $cmdkeySuccess = $LASTEXITCODE -eq 0
-                        
-                        if ($cmdkeySuccess) {
-                            Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                            Write-Host "Credentials stored successfully!" -ForegroundColor Green
+                        # Use Start-Process to properly capture exit code and handle special characters in password
+                        # cmdkey doesn't accept quotes around /pass parameter, so we need to pass arguments correctly
+                        try {
+                            $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+                            $processInfo.FileName = "cmdkey.exe"
+                            # Build arguments - cmdkey doesn't like quotes around /pass, so pass password directly
+                            # If username or password contains spaces, we may need to handle differently
+                            $processInfo.Arguments = "/add:$cmdkeyTarget /user:$usernameInput /pass:$password"
+                            $processInfo.UseShellExecute = $false
+                            $processInfo.RedirectStandardOutput = $true
+                            $processInfo.RedirectStandardError = $true
+                            $processInfo.CreateNoWindow = $true
                             
-                            # Re-check to confirm credentials are stored
-                            Start-Sleep -Seconds 1
-                            $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
-                            if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
-                                $credentialsStored = $true
-                                Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                            } else {
-                                Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
-                                $credentialsStored = $true  # Assume success if cmdkey returned 0
+                            $process = New-Object System.Diagnostics.Process
+                            $process.StartInfo = $processInfo
+                            
+                            # Start process and capture output
+                            $process.Start() | Out-Null
+                            
+                            $stdout = $process.StandardOutput.ReadToEnd()
+                            $stderr = $process.StandardError.ReadToEnd()
+                            $process.WaitForExit()
+                            
+                            $cmdkeyExitCode = $process.ExitCode
+                            # Combine both outputs for better error reporting
+                            $cmdkeyResult = if ($stderr) { $stderr.Trim() } elseif ($stdout) { $stdout.Trim() } else { "" }
+                            
+                            # If cmdkey fails with "parameter is incorrect", try alternative method using net use
+                            if ($cmdkeyExitCode -ne 0 -and $cmdkeyResult -match "parameter is incorrect|The parameter is incorrect") {
+                                Write-Log "cmdkey failed with parameter error. Trying alternative method using net use..." -Level 'WARNING' -Section "Network Drive Mapping"
+                                
+                                # Try using net use to store credentials (this can work when cmdkey fails)
+                                try {
+                                    # Use net use with /user and /persistent to store credentials
+                                    $netUseResult = net use $cmdkeyTarget /user:$usernameInput $password 2>&1 | Out-String
+                                    $netUseSuccess = $LASTEXITCODE -eq 0
+                                    
+                                    if ($netUseSuccess) {
+                                        Write-Log "Credentials stored successfully using net use method" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                                        $cmdkeyExitCode = 0
+                                        $cmdkeyResult = "Credentials stored via net use"
+                                    } else {
+                                        Write-Log "net use method also failed: $netUseResult" -Level 'WARNING' -Section "Network Drive Mapping"
+                                    }
+                                } catch {
+                                    Write-Log "Alternative net use method failed: $_" -Level 'WARNING' -Section "Network Drive Mapping"
+                                }
                             }
-                        } else {
-                            Write-Log "Failed to store credentials: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
-                            Write-Host "Failed to store credentials. Error: $cmdkeyResult" -ForegroundColor Red
+                            
+                            if ($cmdkeyExitCode -eq 0) {
+                                Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                                Write-Host "Credentials stored successfully!" -ForegroundColor Green
+                                
+                                # Re-check to confirm credentials are stored
+                                Start-Sleep -Seconds 1
+                                $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
+                                if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
+                                    $credentialsStored = $true
+                                    Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                                } else {
+                                    Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
+                                    $credentialsStored = $true  # Assume success if cmdkey returned 0
+                                }
+                            } else {
+                                Write-Log "Failed to store credentials (Exit code: $cmdkeyExitCode). Output: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
+                                Write-Host "Failed to store credentials. Error: $cmdkeyResult" -ForegroundColor Red
+                                if ($cmdkeyResult -match "already exists") {
+                                    Write-Host "Note: Credentials may already exist. Continuing..." -ForegroundColor Yellow
+                                    $credentialsStored = $true  # If it already exists, treat as success
+                                } else {
+                                    $script:ErrorCount++
+                                }
+                            }
+                        } catch {
+                            Write-Log "Exception while storing credentials: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                            Write-Host "Exception while storing credentials: $_" -ForegroundColor Red
                             $script:ErrorCount++
                         }
                         
@@ -1846,16 +1902,43 @@ else {
         $configStart = Get-Date
         
         # Run winget configuration with real-time output streaming
-        $outputFile = "C:\temp\winget-config-output-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
-        $errorFile = "C:\temp\winget-config-error-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+        # All output will be logged to the main log file
         $configOutput = @()
         $script:currentPackage = $null
         $script:packageStartTime = $null
         
+        # Ensure we have the full path to the DSC file
+        $dscAdminFullPath = if ([System.IO.Path]::IsPathRooted($dscAdmin)) {
+            $dscAdmin
+        } else {
+            $resolvedPath = Resolve-Path -Path $dscAdmin -ErrorAction SilentlyContinue
+            if ($resolvedPath) {
+                $resolvedPath.Path
+            } else {
+                Join-Path (Get-Location) $dscAdmin
+            }
+        }
+        
+        # Normalize the path (resolve any .. or . components)
+        $dscAdminFullPath = [System.IO.Path]::GetFullPath($dscAdminFullPath)
+        
+        # Verify the file exists before running
+        if (-not (Test-Path $dscAdminFullPath)) {
+            $script:ErrorCount++
+            Write-Log "DSC file not found at: $dscAdminFullPath" -Level 'ERROR' -Section "Dev Flows Installation"
+            Write-Log "Original path: $dscAdmin" -Level 'INFO' -Section "Dev Flows Installation"
+            Write-Log "Current directory: $(Get-Location)" -Level 'INFO' -Section "Dev Flows Installation"
+            Write-Log "Files in current directory: $((Get-ChildItem -File | Select-Object -First 10 | ForEach-Object { $_.Name }) -join ', ')" -Level 'INFO' -Section "Dev Flows Installation"
+            End-Section "Dev Flows Installation"
+            return
+        }
+        
+        Write-Log "Using DSC file: $dscAdminFullPath" -Level 'INFO' -Section "Dev Flows Installation"
+        
         # Create process info for real-time output capture
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "winget"
-        $psi.Arguments = "configuration -f `"$dscAdmin`" --accept-configuration-agreements"
+        $psi.Arguments = "configuration -f `"$dscAdminFullPath`" --accept-configuration-agreements"
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
@@ -1972,12 +2055,26 @@ else {
         # Clean up event handlers
         Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
         
-        # Save output to files
-        try {
-            $script:outputBuilder.ToString() | Out-File -FilePath $outputFile -Encoding UTF8
-            $script:errorBuilder.ToString() | Out-File -FilePath $errorFile -Encoding UTF8
-        } catch {
-            Write-Log "Warning: Could not save output files" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+        # Write all captured output to the main log file instead of separate files
+        $outputText = $script:outputBuilder.ToString()
+        $errorText = $script:errorBuilder.ToString()
+        
+        if ($outputText) {
+            Write-Log "=== Winget Configuration Output ===" -Level 'INFO' -Section "Dev Flows Installation"
+            $outputText -split "`r?`n" | ForEach-Object {
+                if (-not [string]::IsNullOrWhiteSpace($_)) {
+                    Write-Log "WINGET OUTPUT: $_" -Level 'INFO' -Section "Dev Flows Installation"
+                }
+            }
+        }
+        
+        if ($errorText) {
+            Write-Log "=== Winget Configuration Errors ===" -Level 'ERROR' -Section "Dev Flows Installation"
+            $errorText -split "`r?`n" | ForEach-Object {
+                if (-not [string]::IsNullOrWhiteSpace($_)) {
+                    Write-Log "WINGET ERROR: $_" -Level 'ERROR' -Section "Dev Flows Installation"
+                }
+            }
         }
         
         $configDuration = (Get-Date) - $configStart
@@ -2002,9 +2099,6 @@ else {
         if ($packageCount -gt 0) {
             Write-Log "Total packages processed: $packageCount" -Level 'INFO' -Section "Dev Flows Installation"
         }
-        
-        # Keep output files for debugging
-        Write-Log "Output files saved for debugging: $outputFile, $errorFile" -Level 'INFO' -Section "Dev Flows Installation"
         
     } catch {
         $script:ErrorCount++
