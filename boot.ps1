@@ -276,41 +276,143 @@ function End-Section {
     }
 }
 
-# Bootstrap WinGet using PowerShell module (works in Windows Sandbox and other environments)
-# Method from official WinGet documentation: https://learn.microsoft.com/en-us/windows/package-manager/
-Start-Section "WinGet Bootstrap"
-Write-Log "Installing WinGet PowerShell module from PSGallery..." -Level 'INFO' -Section "WinGet Bootstrap"
-
-# Install NuGet package provider (method from WinGet documentation)
-try {
-    Install-PackageProvider -Name NuGet -Force -ErrorAction Stop | Out-Null
-    Write-Log "NuGet package provider installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-} catch {
-    $script:ErrorCount++
-    Write-Log "Failed to install NuGet package provider" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+# Function to check if WinGet is available and working
+# Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+function Test-WinGetInstalled {
+    try {
+        # Refresh PATH to ensure winget is available if recently installed
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
+        # Use --info for better compatibility (recommended by Microsoft docs)
+        $wingetInfo = winget --info 2>$null
+        if ($wingetInfo) {
+            # Extract version from --info output or use -v
+            $wingetVersion = winget -v 2>$null
+            if ($wingetVersion) {
+                return @{
+                    Installed = $true
+                    Version = $wingetVersion
+                    Working = $true
+                }
+            }
+        }
+    } catch {
+        # WinGet command not available
+    }
+    
+    return @{
+        Installed = $false
+        Version = $null
+        Working = $false
+    }
 }
 
-# Install Microsoft.WinGet.Client module (method from WinGet documentation)
-try {
-    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -ErrorAction Stop | Out-Null
-    Write-Log "Microsoft.WinGet.Client module installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-} catch {
-    $script:ErrorCount++
-    Write-Log "Failed to install Microsoft.WinGet.Client module" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
+# Check if WinGet is already installed and working
+# Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+Start-Section "WinGet Check"
+$wingetStatus = Test-WinGetInstalled
+$wingetInstalled = $wingetStatus.Installed
+$wingetWorking = $wingetStatus.Working
+
+if ($wingetInstalled -and $wingetWorking) {
+    Write-Log "WinGet is already installed and working (Version: $($wingetStatus.Version)). Skipping WinGet installation." -Level 'SUCCESS' -Section "WinGet Check"
+    End-Section "WinGet Check"
+    $skipWinGetInstall = $true
+} else {
+    Write-Log "WinGet is not installed or not working. Proceeding with installation..." -Level 'INFO' -Section "WinGet Check"
+    End-Section "WinGet Check"
+    $skipWinGetInstall = $false
 }
 
-Write-Log "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..." -Level 'INFO' -Section "WinGet Bootstrap"
-
-# Bootstrap WinGet using the PowerShell module (method from WinGet documentation)
-try {
-    Repair-WinGetPackageManager -AllUsers -ErrorAction Stop
-    Write-Log "WinGet bootstrapped successfully via PowerShell module" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-} catch {
-    $script:WarningCount++
-    Write-Log "Repair-WinGetPackageManager failed, will continue with manual installation" -Level 'WARNING' -Section "WinGet Bootstrap" -Exception $_
+# Only proceed with WinGet installation if it's not already installed
+if (-not $skipWinGetInstall) {
+    # Install WinGet using preferred method from official documentation
+    # Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+    # WinGet is available as part of App Installer, a System Component
+    Start-Section "WinGet Bootstrap"
+    $wingetBootstrapSuccess = $false
+    
+    # Preferred Method 1: Register App Installer (System Component method)
+    # WinGet comes with App Installer, which is a System Component on Windows 10/11
+    # If App Installer exists but WinGet isn't registered, we can register it
+    try {
+        Write-Log "Attempting to register App Installer (preferred method)..." -Level 'INFO' -Section "WinGet Bootstrap"
+        Write-Log "WinGet is part of App Installer, a System Component delivered via Microsoft Store" -Level 'INFO' -Section "WinGet Bootstrap"
+        Write-Log "Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/" -Level 'INFO' -Section "WinGet Bootstrap"
+        
+        # Register App Installer package to make WinGet available
+        # This is the preferred method per Microsoft documentation
+        Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        
+        # Refresh PATH to pick up WinGet
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        Start-Sleep -Seconds 2
+        
+        # Verify WinGet is now working
+        $verifyStatus = Test-WinGetInstalled
+        if ($verifyStatus.Installed -and $verifyStatus.Working) {
+            Write-Log "WinGet registered successfully via App Installer (Version: $($verifyStatus.Version))" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+            Write-Log "Skipping alternative install methods - App Installer method succeeded" -Level 'INFO' -Section "WinGet Bootstrap"
+            $wingetBootstrapSuccess = $true
+        } else {
+            Write-Log "App Installer registration completed but WinGet not yet available. May need PowerShell restart." -Level 'WARNING' -Section "WinGet Bootstrap"
+            $wingetBootstrapSuccess = $false
+        }
+    } catch {
+        Write-Log "App Installer registration method failed. Will try alternative install methods." -Level 'WARNING' -Section "WinGet Bootstrap" -Exception $_
+        $wingetBootstrapSuccess = $false
+    }
+    
+    # Alternative Install Methods: Only run if App Installer method failed
+    # PowerShell module method (for Windows Sandbox and environments without App Installer)
+    # This method is specifically recommended for Windows Sandbox per Microsoft documentation
+    if (-not $wingetBootstrapSuccess) {
+        try {
+            Write-Log "Attempting PowerShell module method (for Windows Sandbox and other environments)..." -Level 'INFO' -Section "WinGet Bootstrap"
+            Write-Log "This method works in Windows Sandbox where App Installer may not be available" -Level 'INFO' -Section "WinGet Bootstrap"
+            
+            # Install NuGet package provider (required for PowerShell Gallery)
+            Write-Log "Installing NuGet package provider..." -Level 'INFO' -Section "WinGet Bootstrap"
+            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop | Out-Null
+            Write-Log "NuGet package provider installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+            
+            # Install Microsoft.WinGet.Client module
+            Write-Log "Installing Microsoft.WinGet.Client PowerShell module..." -Level 'INFO' -Section "WinGet Bootstrap"
+            Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -ErrorAction Stop | Out-Null
+            Write-Log "Microsoft.WinGet.Client module installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+            
+            # Bootstrap WinGet using Repair-WinGetPackageManager
+            Write-Log "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..." -Level 'INFO' -Section "WinGet Bootstrap"
+            Repair-WinGetPackageManager -AllUsers -ErrorAction Stop
+            Write-Log "WinGet bootstrapped successfully via PowerShell module" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+            
+            # Refresh PATH and verify WinGet is now working
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            Start-Sleep -Seconds 3
+            
+            $fallbackStatus = Test-WinGetInstalled
+            if ($fallbackStatus.Installed -and $fallbackStatus.Working) {
+                Write-Log "WinGet verified and working after PowerShell module installation (Version: $($fallbackStatus.Version))" -Level 'SUCCESS' -Section "WinGet Bootstrap"
+                $wingetBootstrapSuccess = $true
+            } else {
+                Write-Log "WinGet installed via PowerShell module but not yet available. May need PowerShell restart." -Level 'WARNING' -Section "WinGet Bootstrap"
+            }
+        } catch {
+            $script:ErrorCount++
+            Write-Log "PowerShell module method also failed" -Level 'WARNING' -Section "WinGet Bootstrap" -Exception $_
+        }
+    }
+    
+    # Final fallback: Manual installation instructions
+    if (-not $wingetBootstrapSuccess) {
+        Write-Log "All automated methods failed. WinGet may need manual installation." -Level 'ERROR' -Section "WinGet Bootstrap"
+        Write-Log "Please install WinGet manually from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1" -Level 'INFO' -Section "WinGet Bootstrap"
+        Write-Log "Or download from: https://github.com/microsoft/winget-cli/releases" -Level 'INFO' -Section "WinGet Bootstrap"
+    }
+    
+    End-Section "WinGet Bootstrap"
 }
-
-End-Section "WinGet Bootstrap"
 
 # ---------------
 # Enable WinGet Configuration Features (required for DSC files)
@@ -456,435 +558,6 @@ try {
 }
 End-Section "NFS Client Installation"
 # ---------------
-
-# Check if WinGet is installed and get version
-# According to Microsoft documentation: https://learn.microsoft.com/en-us/windows/package-manager/
-# WinGet is included in Windows 10 version 1809+ and Windows 11 as part of App Installer
-$wingetInstalled = $false
-$isWinGetRecent = $null
-
-# Function to check if WinGet is available and get version
-function Test-WinGetInstalled {
-    try {
-        # Refresh PATH to ensure winget is available if recently installed
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-        
-        # Use --info for better compatibility (recommended by Microsoft docs)
-        $wingetInfo = winget --info 2>$null
-        if ($wingetInfo) {
-            # Extract version from --info output or use -v
-            $wingetVersion = winget -v 2>$null
-            if ($wingetVersion) {
-                return @{
-                    Installed = $true
-                    Version = $wingetVersion
-                    VersionArray = $wingetVersion.Trim('v').TrimEnd("-preview").split('.')
-                    Working = $true
-                }
-            }
-        }
-    } catch {
-        # WinGet command not available, but package might be installed
-    }
-    
-    # Check if App Installer package is installed (which includes WinGet)
-    $appInstaller = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
-    if ($appInstaller) {
-        # If package is installed but command doesn't work, it might need a refresh or restart
-        return @{
-            Installed = $true
-            Version = $appInstaller.Version
-            VersionArray = $null
-            AppInstallerInstalled = $true
-            Working = $false  # Command not working, may need refresh
-        }
-    }
-    
-    return @{
-        Installed = $false
-        Version = $null
-        VersionArray = $null
-        Working = $false
-    }
-}
-
-$wingetStatus = Test-WinGetInstalled
-$wingetInstalled = $wingetStatus.Installed
-$isWinGetRecent = $wingetStatus.VersionArray
-$wingetWorking = $wingetStatus.Working
-
-# If WinGet package is installed but command doesn't work, try refreshing PATH and testing again
-if ($wingetInstalled -and -not $wingetWorking) {
-    Write-Log "WinGet package detected but command not available. Refreshing environment..." -Level 'WARNING' -Section "WinGet Bootstrap"
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-    Start-Sleep -Seconds 2
-    
-    # Test again
-    $wingetStatus = Test-WinGetInstalled
-    $wingetInstalled = $wingetStatus.Installed
-    $isWinGetRecent = $wingetStatus.VersionArray
-    $wingetWorking = $wingetStatus.Working
-    
-    if ($wingetWorking) {
-        Write-Log "WinGet is now working after PATH refresh" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-    } else {
-        Write-Log "WinGet package installed but command still not available. May need PowerShell restart." -Level 'WARNING' -Section "WinGet Bootstrap"
-    }
-}
-
-# forcing WinGet to be installed if not present, not working, or version is too old
-if (-not $wingetInstalled -or -not $wingetWorking -or $null -eq $isWinGetRecent -or !(($isWinGetRecent[0] -gt 1) -or ($isWinGetRecent[0] -ge 1 -and $isWinGetRecent[1] -ge 6))) # WinGet is greater than v1 or v1.6 or higher
-{
-   Write-Host "Downloading WinGet and its dependencies..."
-   
-   # Function to check if a package is already installed
-   function Test-AppxPackageInstalled {
-       param([string]$PackageName)
-       $installed = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
-       return ($null -ne $installed)
-   }
-   
-   # Function to validate downloaded file
-   function Test-FileValid {
-       param([string]$FilePath, [long]$MinSizeBytes = 1000)
-       if (-not (Test-Path $FilePath)) {
-           return $false
-       }
-       $fileInfo = Get-Item $FilePath -ErrorAction SilentlyContinue
-       if ($null -eq $fileInfo) {
-           return $false
-       }
-       # Check if file size is reasonable (at least MinSizeBytes)
-       if ($fileInfo.Length -lt $MinSizeBytes) {
-           Write-Warning "File $FilePath appears to be too small ($($fileInfo.Length) bytes), may be corrupted"
-           return $false
-       }
-       return $true
-   }
-   
-   # Check if Windows App Runtime is already installed (package names are versioned like Microsoft.WindowsAppRuntime.1.8)
-   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
-   
-   if ($appRuntimeInstalled) {
-       # Get the actual installed version for logging
-       $runtimePackages = Get-AppxPackage -Name "Microsoft.WindowsAppRuntime*" -ErrorAction SilentlyContinue
-       if ($runtimePackages) {
-           $latestVersion = $runtimePackages | Sort-Object Version -Descending | Select-Object -First 1
-           Write-Log "Windows App Runtime is already installed (Version: $($latestVersion.Version), Package: $($latestVersion.Name))" -Level 'INFO' -Section "WinGet Bootstrap"
-       } else {
-           Write-Log "Windows App Runtime is already installed" -Level 'INFO' -Section "WinGet Bootstrap"
-       }
-   }
-   
-   if (-not $appRuntimeInstalled) {
-       Write-Host "Windows App Runtime not found, attempting to install..."
-       
-       # Try Microsoft Store first (if available)
-       $storeAvailable = $true
-       try {
-           $storeTest = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
-           if (-not $storeTest) {
-               $storeAvailable = $false
-               Write-Host "Microsoft Store not available (e.g., Windows Sandbox). Will install WinGet first, then use winget to install Windows App Runtime."
-           }
-       } catch {
-           $storeAvailable = $false
-       }
-       
-       if ($storeAvailable) {
-           # Try Microsoft Store method
-           try {
-               Write-Log "Opening Microsoft Store for Windows App Runtime..." -Level 'INFO' -Section "WinGet Bootstrap"
-               Start-Process "ms-windows-store://pdp/?ProductId=9P7KNL5RWT25" -ErrorAction Stop
-               Start-Sleep -Seconds 2  # Give Store time to open
-               
-               $installed = Wait-ForStoreInstallation -AppName "Windows App Runtime" -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
-               if ($installed) {
-                   # Check if it got installed (use wildcard to match versioned package names)
-                   $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
-               if ($appRuntimeInstalled) {
-                       Write-Log "Windows App Runtime installed via Microsoft Store" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-                   }
-               }
-           } catch {
-               $script:ErrorCount++
-               Write-Log "Could not open Microsoft Store for Windows App Runtime" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
-               $storeAvailable = $false
-           }
-       }
-       
-       # If Store method didn't work or isn't available, skip direct download entirely
-       # Direct download of Windows App Runtime is unreliable - we'll install WinGet first, then use winget to install the runtime
-       if (-not $appRuntimeInstalled) {
-           Write-Host "Windows App Runtime not installed."
-           Write-Host "Will attempt to install WinGet first, then use winget to install Windows App Runtime."
-           Write-Host "This approach works better in environments like Windows Sandbox where Store is unavailable."
-       }
-   } else {
-       Write-Host "Windows App Runtime already installed"
-   }
-   
-   # Download other dependencies
-   $paths = @()
-   $uris = @()
-   $fileNames = @()
-   
-   # VCLibs
-   if (-not (Test-AppxPackageInstalled -PackageName "Microsoft.VCLibs.140.00")) {
-       $paths += "Microsoft.VCLibs.x64.14.00.Desktop.appx"
-       $uris += "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"
-       $fileNames += "VCLibs"
-   } else {
-       Write-Host "VCLibs already installed"
-   }
-   
-   # UI.Xaml
-   if (-not (Test-AppxPackageInstalled -PackageName "Microsoft.UI.Xaml.2.8")) {
-       $paths += "Microsoft.UI.Xaml.2.8.x64.appx"
-       $uris += "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"
-       $fileNames += "UI.Xaml"
-   } else {
-       Write-Host "UI.Xaml already installed"
-   }
-   
-   # Check if WinGet is already installed and working before attempting installation
-   $wingetInstalledSuccessfully = $false
-   $wingetStatus = Test-WinGetInstalled
-   if ($wingetStatus.Installed -and $wingetStatus.Working) {
-       Write-Log "WinGet is already installed and working (Version: $($wingetStatus.Version)). Skipping WinGet installation." -Level 'INFO' -Section "WinGet Bootstrap"
-       $wingetInstalledSuccessfully = $true
-   } else {
-       # WinGet bundle - only add to download list if not already installed
-   $wingetBundlePath = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-   $paths += $wingetBundlePath
-   $uris += "https://aka.ms/getwinget"
-   $fileNames += "WinGet"
-   }
-   
-   # Download dependencies (only if there are any to download)
-   if ($uris.Count -gt 0) {
-   for ($i = 0; $i -lt $uris.Length; $i++) {
-       $filePath = $paths[$i]
-       $fileUri = $uris[$i]
-       $fileName = $fileNames[$i]
-       Write-Host "Downloading: $fileName from $fileUri"
-       try {
-           if (Test-Path $filePath) {
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-           }
-           Invoke-WebRequest -Uri $fileUri -OutFile $filePath -ErrorAction Stop
-           
-           # Validate downloaded file
-           $minSize = if ($fileName -eq "WinGet") { 10000000 } else { 1000000 }
-           if (-not (Test-FileValid -FilePath $filePath -MinSizeBytes $minSize)) {
-               Write-Warning "$fileName download appears invalid, will retry or skip"
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-               $paths[$i] = $null
-           }
-       } catch {
-           Write-Warning "Failed to download $fileName : $_"
-           if (Test-Path $filePath) {
-               Remove-Item $filePath -Force -ErrorAction SilentlyContinue
-           }
-           $paths[$i] = $null
-       }
-       }
-   } else {
-       Write-Log "All dependencies already installed. Skipping download." -Level 'INFO' -Section "WinGet Bootstrap"
-   }
-   
-   # Only proceed with installation if WinGet is not already installed
-   if (-not $wingetInstalledSuccessfully) {
-   Write-Host "Installing WinGet and its dependencies..."
-   
-   # Note: Windows App Runtime will be installed via winget after WinGet is installed
-   # This approach is more reliable than direct download
-   
-   # Install VCLibs and UI.Xaml (skip WinGet bundle for now)
-   for ($i = 0; $i -lt ($paths.Count - 1); $i++) {
-       if ($null -ne $paths[$i] -and (Test-Path $paths[$i])) {
-           Write-Host "Installing: $($fileNames[$i])"
-           try {
-               Add-AppxPackage $paths[$i] -ErrorAction Stop
-               Write-Host "$($fileNames[$i]) installed successfully"
-           } catch {
-               Write-Warning "$($fileNames[$i]) installation failed: $_"
-           }
-       }
-   }
-   
-   # Install DesktopAppInstaller (WinGet) - this should work now with dependencies installed
-   $wingetBundleIndex = $paths.Count - 1
-   if ($null -ne $paths[$wingetBundleIndex] -and (Test-Path $paths[$wingetBundleIndex])) {
-           Write-Log "Installing: Microsoft.DesktopAppInstaller (WinGet)" -Level 'INFO' -Section "WinGet Bootstrap"
-       try {
-           Add-AppxPackage $paths[$wingetBundleIndex] -ErrorAction Stop
-               Write-Log "WinGet installed successfully" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-           $wingetInstalledSuccessfully = $true
-       } catch {
-               $errorMessage = $_.Exception.Message
-               Write-Log "WinGet installation failed: $errorMessage" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
-               
-               # Check for specific "package in use" error (0x80073D02)
-               if ($errorMessage -match "0x80073D02" -or $errorMessage -match "resources it modifies are currently in use") {
-                   Write-Log "WinGet package is already installed but may be in use. Checking if WinGet command works..." -Level 'WARNING' -Section "WinGet Bootstrap"
-                   
-                   # Refresh PATH and test if WinGet works now
-                   $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-                   Start-Sleep -Seconds 2
-                   
-                   try {
-                       $wingetTest = winget --info 2>$null
-                       if ($wingetTest) {
-                           Write-Log "WinGet is actually working! The installation error was a false alarm." -Level 'SUCCESS' -Section "WinGet Bootstrap"
-                           $wingetInstalledSuccessfully = $true
-                       } else {
-                           Write-Log "WinGet package exists but command not available. May need to close App Installer processes or restart PowerShell." -Level 'WARNING' -Section "WinGet Bootstrap"
-                       }
-                   } catch {
-                       Write-Log "WinGet command still not available after PATH refresh" -Level 'WARNING' -Section "WinGet Bootstrap"
-                   }
-               }
-           }
-       }
-   } else {
-       Write-Log "WinGet installation skipped - already installed and working." -Level 'INFO' -Section "WinGet Bootstrap"
-   }
-   
-   # If WinGet installation failed, try Microsoft Store method (if available)
-   # According to Microsoft docs, WinGet is distributed via Microsoft Store for security
-   if (-not $wingetInstalledSuccessfully) {
-       # Check if Microsoft Store is available
-       $storeAvailable = $true
-       try {
-           $storeTest = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
-           if (-not $storeTest) {
-               $storeAvailable = $false
-           }
-       } catch {
-           $storeAvailable = $false
-       }
-       
-       if ($storeAvailable) {
-           Write-Log "Attempting to install WinGet via Microsoft Store (recommended method)..." -Level 'INFO' -Section "WinGet Bootstrap"
-           Write-Log "WinGet is distributed via Microsoft Store for secure installation with certificate pinning." -Level 'INFO' -Section "WinGet Bootstrap"
-           try {
-               # Use the official Microsoft Store link for App Installer (which includes WinGet)
-               Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -ErrorAction Stop
-               Start-Sleep -Seconds 2  # Give Store time to open
-               
-               $installed = Wait-ForStoreInstallation -AppName "App Installer (WinGet)" -PackageName "Microsoft.DesktopAppInstaller"
-               if ($installed) {
-               # Check if App Installer was installed
-               $appInstallerCheck = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
-               if ($appInstallerCheck) {
-                       Write-Log "App Installer (WinGet) detected after Store installation" -Level 'SUCCESS' -Section "WinGet Bootstrap"
-                   $wingetInstalledSuccessfully = $true
-                   }
-               }
-           } catch {
-               $script:ErrorCount++
-               Write-Log "Could not open Microsoft Store for WinGet" -Level 'ERROR' -Section "WinGet Bootstrap" -Exception $_
-               Write-Log "You can manually install WinGet from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1" -Level 'INFO' -Section "WinGet Bootstrap"
-           }
-       } else {
-           Write-Host "Microsoft Store not available (e.g., Windows Sandbox). WinGet installation may require manual intervention."
-           Write-Host "You can download WinGet manually from: https://github.com/microsoft/winget-cli/releases"
-       }
-   }
-   
-   # If WinGet is now installed but Windows App Runtime is still missing, try installing it via winget
-   if ($wingetInstalledSuccessfully -and -not $appRuntimeInstalled) {
-       Write-Host "WinGet is installed. Attempting to install Windows App Runtime via winget..."
-       try {
-           winget install --id Microsoft.WindowsAppRuntime -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-           if ($LASTEXITCODE -eq 0) {
-               Start-Sleep -Seconds 3
-               $appRuntimeInstalled = Test-AppxPackageInstalled -PackageName "Microsoft.WindowsAppRuntime" -UseWildcard
-               if ($appRuntimeInstalled) {
-                   Write-Host "Windows App Runtime installed successfully via winget"
-               }
-           }
-       } catch {
-           Write-Warning "Failed to install Windows App Runtime via winget: $_"
-       }
-   }
-   
-   Write-Host "Verifying WinGet installation..."
-   # Refresh environment to pick up winget
-   $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-   
-   # Wait a bit more for installation to complete
-   Start-Sleep -Seconds 3
-   
-   # Verify using --info (recommended by Microsoft documentation)
-   # Reference: https://learn.microsoft.com/en-us/windows/package-manager/
-   $wingetFinalCheck = $false
-   try {
-       $wingetInfo = winget --info 2>$null
-       if ($wingetInfo) {
-           $wingetVersion = winget -v 2>$null
-           if ($wingetVersion) {
-               Write-Host "WinGet installed successfully. Version: $wingetVersion"
-               $wingetFinalCheck = $true
-           } else {
-               Write-Host "WinGet is available (verified with --info)"
-               $wingetFinalCheck = $true
-           }
-       } else {
-           Write-Warning "WinGet may not be available yet. You may need to restart PowerShell or wait a moment."
-           Write-Host "If WinGet is still not available, please install it manually from the Microsoft Store:"
-           Write-Host "https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
-       }
-   } catch {
-       Write-Warning "WinGet verification failed. You may need to restart PowerShell or install WinGet from Microsoft Store."
-       Write-Host "Microsoft Store link: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
-   }
-   
-   # Final verification - if WinGet is still not available, stop the script
-   if (-not $wingetFinalCheck) {
-       # Wait a bit more and do one final check
-       Start-Sleep -Seconds 5
-       $finalWingetCheck = Test-WinGetInstalled
-       if (-not $finalWingetCheck.Installed) {
-           Write-Host ""
-           Write-Host "================================================" -ForegroundColor Red
-           Write-Host "ERROR: WinGet could not be installed or verified." -ForegroundColor Red
-           Write-Host "================================================" -ForegroundColor Red
-           Write-Host ""
-           Write-Host "The script cannot continue without WinGet, as it is required for installing applications."
-           Write-Host ""
-           Write-Host "Please try one of the following:"
-           Write-Host "1. Install WinGet manually from: https://www.microsoft.com/store/productId/9NBLGGH4NNS1"
-           Write-Host "2. Download WinGet from: https://github.com/microsoft/winget-cli/releases"
-           Write-Host "3. Restart PowerShell and run this script again"
-           Write-Host "4. Ensure Windows App Runtime is installed first, then retry"
-           Write-Host ""
-           Write-Host "Exiting script..." -ForegroundColor Yellow
-           exit 1
-       } else {
-           Write-Host "WinGet verified successfully after additional wait time"
-       }
-   }
-   
-   Write-Host "Cleaning up"
-   $allFiles = @($paths)
-   if (Test-Path ".\AppRuntime") {
-       $allFiles += ".\AppRuntime"
-   }
-   foreach($filePath in $allFiles)
-   {
-      if ($null -ne $filePath -and (Test-Path $filePath)) 
-      {
-         Write-Host "Deleting: ($filePath)"
-         Remove-Item $filePath -Recurse -Force -ErrorAction SilentlyContinue
-      }
-   }
-}
-else {
-   Write-Host "WinGet in decent state, moving to executing DSC"
-}
 
 # ---------------
 # Activating Windows with HWID (integrated - no external file needed)
@@ -1177,6 +850,34 @@ if (!$isAdmin) {
 else {
    # admin section now
    # ---------------
+    # ---------------
+    # Configure File Explorer to show hidden files and folders
+    Write-Host "Start: Configuring File Explorer settings"
+    try {
+        Start-Section "File Explorer Configuration"
+        $explorerKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        
+        # Ensure the registry path exists
+        if (-not (Test-Path $explorerKey)) {
+            New-Item -Path $explorerKey -Force | Out-Null
+        }
+        
+        # Set Hidden to 2 (Show hidden files, folders, and drives)
+        Set-ItemProperty -Path $explorerKey -Name "Hidden" -Value 2 -Type DWORD -Force
+        Write-Log "File Explorer configured to show hidden files, folders, and drives" -Level 'SUCCESS' -Section "File Explorer Configuration"
+        
+        # Refresh File Explorer to apply changes
+        # This will restart explorer.exe to apply the registry changes
+        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        Start-Process "explorer.exe"
+        
+        End-Section "File Explorer Configuration"
+    } catch {
+        $script:ErrorCount++
+        Write-Log "Failed to configure File Explorer settings" -Level 'ERROR' -Section "File Explorer Configuration" -Exception $_
+    }
+    Write-Host "Done: Configuring File Explorer settings"
     # ---------------
     # Adding Microsoft Account (MSA) sign-in
     # Note: Windows does not provide a direct command-line method to add a Microsoft account
