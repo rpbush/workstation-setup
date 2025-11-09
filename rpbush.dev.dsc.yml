@@ -1,5 +1,4 @@
 # yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
-# Reference: https://github.com/microsoft/PowerToys/blob/main/doc/devdocs/readme.md#compiling-powertoys
 properties:
   configurationVersion: 0.2.0
   resources:
@@ -29,15 +28,6 @@ properties:
       settings:
         id: git.git
         source: winget
-
-    # Clone the PowerToys repository
-    - resource: GitDsc/GitClone
-      directives:
-        description: Clone the PowerToys repository
-        allowPrerelease: true
-      settings:
-        HttpsUrl: https://github.com/microsoft/powertoys.git
-        RootDirectory: 'Z:/Source/'
 
     # Install PowerShell 7
     - resource: Microsoft.WinGet.DSC/WinGetPackage
@@ -78,16 +68,6 @@ properties:
       settings:
         id: Valve.Steam
         source: winget
-
-    # Install Remote Desktop
-    - resource: Microsoft.WinGet.DSC/WinGetPackage
-      id: 9WZDNCRFJ3PS
-      directives:
-        description: Install Remote Desktop
-        allowPrerelease: true
-      settings:
-        id: 9WZDNCRFJ3PS
-        source: msstore
 
     # Install 7zip
     - resource: Microsoft.WinGet.DSC/WinGetPackage
@@ -221,10 +201,21 @@ properties:
 
     # Install Ubiquiti Identity Desktop
     - resource: Microsoft.WinGet.DSC/WinGetPackage
-      id: UbiquitiInc.IdentityDesktop
+      id: Ubiquiti.IdentityDesktop.Endpoint
       directives:
         description: Install Ubiquiti Identity Desktop
         allowPrerelease: true
       settings:
-        id: UbiquitiInc.IdentityDesktop
+        id: Ubiquiti.IdentityDesktop.Endpoint
         source: winget
+
+    # Install Ubiquiti WiFiman Desktop
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: Ubiquiti.WiFimanDesktop
+      directives:
+        description: Install Ubiquiti WiFiman Desktop
+        allowPrerelease: true
+      settings:
+        id: Ubiquiti.WiFimanDesktop
+        source: winget
+

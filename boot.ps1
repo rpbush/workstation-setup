@@ -776,7 +776,6 @@ $scriptDir = Split-Path $mypath -Parent
 $dscNonAdmin = "rpbush.nonAdmin.dsc.yml";
 $dscAdmin = "rpbush.dev.dsc.yml";
 $dscOffice = "rpbush.office.dsc.yml";
-$dscPowerToysEnterprise = "Z:\source\powertoys\.configurations\configuration.vsEnterprise.dsc.yaml";
 
 # Check if DSC files exist locally
 $dscNonAdminLocal = Join-Path $scriptDir $dscNonAdmin
@@ -1182,58 +1181,93 @@ else {
         # If credentials are not stored, prompt user to store them
         if (-not $credentialsStored) {
             Write-Host ""
-            Write-Host "========================================" -ForegroundColor Yellow
-            Write-Host "Network Drive Mapping: Credentials" -ForegroundColor Yellow
-            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "========================================" -ForegroundColor Cyan
+            Write-Host "Network Drive Mapping: Credentials Required" -ForegroundColor Cyan
+            Write-Host "========================================" -ForegroundColor Cyan
+            Write-Host ""
             Write-Host "Network drives require credentials to map." -ForegroundColor Yellow
-            Write-Host "Please enter your credentials to store them in Windows Credential Manager." -ForegroundColor Yellow
-            Write-Host "These credentials will be used for both N: (NFS) and S: (SMB) drive mappings." -ForegroundColor Yellow
-            Write-Host "Credentials will be stored securely and persist for future use." -ForegroundColor Yellow
+            Write-Host "Please enter your network credentials below." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "These credentials will be:" -ForegroundColor White
+            Write-Host "  - Stored securely in Windows Credential Manager" -ForegroundColor White
+            Write-Host "  - Used for both N: (NFS) and S: (SMB) drive mappings" -ForegroundColor White
+            Write-Host "  - Persisted for future use" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Server: $serverName" -ForegroundColor Cyan
+            Write-Host "Path: $sPath" -ForegroundColor Cyan
             Write-Host ""
             
             try {
-                # Prompt for credentials
-                $credential = Get-Credential -Message "Enter credentials for $serverName (format: DOMAIN\username or username)" -UserName "$serverName\" -ErrorAction Stop
+                # Prompt for username first (more user-friendly)
+                Write-Host "Enter username (format: DOMAIN\username or username):" -ForegroundColor Yellow
+                $usernameInput = Read-Host "Username"
                 
-                if ($credential) {
-                    $username = $credential.UserName
-                    $networkCred = $credential.GetNetworkCredential()
-                    $password = $networkCred.Password
-                    
-                    # Store credentials using cmdkey for SMB path
-                    Write-Log "Storing credentials in Windows Credential Manager for $cmdkeyTarget..." -Level 'INFO' -Section "Network Drive Mapping"
-                    $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$username /pass:$password 2>&1 | Out-String
-                    $cmdkeySuccess = $LASTEXITCODE -eq 0
-                    
-                    if ($cmdkeySuccess) {
-                        Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        # Re-check to confirm credentials are stored
-                        Start-Sleep -Seconds 1
-                        $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
-                        if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
-                            $credentialsStored = $true
-                            Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        } else {
-                            Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
-                            $credentialsStored = $true  # Assume success if cmdkey returned 0
-                        }
-                    } else {
-                        Write-Log "Failed to store credentials: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
-                        $script:ErrorCount++
-                    }
-                    
-                    # Clear password from memory
-                    $password = $null
-                    $networkCred = $null
-                    $credential = $null
-                } else {
-                    Write-Log "User cancelled credential entry" -Level 'WARNING' -Section "Network Drive Mapping"
+                if ([string]::IsNullOrWhiteSpace($usernameInput)) {
+                    Write-Log "Username was empty. Skipping credential storage." -Level 'WARNING' -Section "Network Drive Mapping"
                     $script:WarningCount++
+                } else {
+                    # Prompt for password using secure string
+                    Write-Host ""
+                    Write-Host "Enter password:" -ForegroundColor Yellow
+                    $securePassword = Read-Host -AsSecureString "Password"
+                    
+                    if ($securePassword) {
+                        # Convert secure string to plain text for cmdkey (required by cmdkey)
+                        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+                        $password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                        
+                        # Store credentials using cmdkey for SMB path
+                        Write-Log "Storing credentials in Windows Credential Manager for $cmdkeyTarget..." -Level 'INFO' -Section "Network Drive Mapping"
+                        Write-Host ""
+                        Write-Host "Storing credentials in Windows Credential Manager..." -ForegroundColor Cyan
+                        
+                        $cmdkeyResult = cmdkey /add:$cmdkeyTarget /user:$usernameInput /pass:$password 2>&1 | Out-String
+                        $cmdkeySuccess = $LASTEXITCODE -eq 0
+                        
+                        if ($cmdkeySuccess) {
+                            Write-Log "Credentials stored successfully in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                            Write-Host "Credentials stored successfully!" -ForegroundColor Green
+                            
+                            # Re-check to confirm credentials are stored
+                            Start-Sleep -Seconds 1
+                            $cmdkeyListAfter = cmdkey /list 2>&1 | Out-String
+                            if ($cmdkeyListAfter -match [regex]::Escape($cmdkeyTarget)) {
+                                $credentialsStored = $true
+                                Write-Log "Credentials verified in credential manager" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                            } else {
+                                Write-Log "Warning: Credentials may not have been stored correctly" -Level 'WARNING' -Section "Network Drive Mapping"
+                                $credentialsStored = $true  # Assume success if cmdkey returned 0
+                            }
+                        } else {
+                            Write-Log "Failed to store credentials: $cmdkeyResult" -Level 'ERROR' -Section "Network Drive Mapping"
+                            Write-Host "Failed to store credentials. Error: $cmdkeyResult" -ForegroundColor Red
+                            $script:ErrorCount++
+                        }
+                        
+                        # Clear password from memory immediately
+                        $password = $null
+                        $securePassword = $null
+                        [System.GC]::Collect()
+                        
+                        # Store username for later use in drive mapping
+                        $username = $usernameInput
+                    } else {
+                        Write-Log "Password was empty. Skipping credential storage." -Level 'WARNING' -Section "Network Drive Mapping"
+                        $script:WarningCount++
+                    }
                 }
             } catch {
                 Write-Log "Failed to get credentials from user: $_" -Level 'ERROR' -Section "Network Drive Mapping" -Exception $_
+                Write-Host "Error getting credentials: $_" -ForegroundColor Red
                 $script:ErrorCount++
             }
+            
+            Write-Host ""
+        } else {
+            Write-Host ""
+            Write-Host "Using existing credentials from Windows Credential Manager" -ForegroundColor Green
+            Write-Host ""
         }
         
         # Map N: drive to NFS:/media (NFS Network)
@@ -1977,31 +2011,6 @@ else {
         Write-Log "Exception during Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
     }
 
-    Start-Section "PowerToys Installation"
-    try {
-        # Check if PowerToys Enterprise DSC file exists (only if Dev Drive was created)
-        if (Test-Path $dscPowerToysEnterprise) {
-            Write-Log "Running winget configuration for PowerToys Enterprise DSC" -Level 'INFO' -Section "PowerToys Installation"
-            $configStart = Get-Date
-            $configOutput = winget configuration -f $dscPowerToysEnterprise --accept-configuration-agreements 2>&1
-            $configDuration = (Get-Date) - $configStart
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "PowerToys DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "PowerToys Installation"
-            } else {
-                $script:ErrorCount++
-                Write-Log "PowerToys DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "PowerToys Installation"
-                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "PowerToys Installation"
-            }
-        } else {
-            Write-Log "PowerToys Enterprise DSC file not found: $dscPowerToysEnterprise" -Level 'INFO' -Section "PowerToys Installation"
-            Write-Log "Skipping PowerToys Enterprise configuration (Dev Drive may not have been created or PowerToys repository not cloned)" -Level 'INFO' -Section "PowerToys Installation"
-        }
-    } catch {
-        $script:ErrorCount++
-        Write-Log "Exception during PowerToys DSC configuration" -Level 'ERROR' -Section "PowerToys Installation" -Exception $_
-    }
-    End-Section "PowerToys Installation"
-   
     # clean up, Clean up, everyone wants to clean up
     if (Test-Path $dscAdmin) {
         Remove-Item $dscAdmin -verbose
