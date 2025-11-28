@@ -525,15 +525,43 @@ try {
         $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
         if ($nfsFeature) {
                 Write-Log "Installing NFS Client feature ($featureName) - this may take a few minutes..." -Level 'INFO' -Section "NFS Client Installation"
+                $installSuccess = $false
+                
+                # Try Enable-WindowsOptionalFeature first (PowerShell method)
                 try {
                     Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
-                    Write-Log "NFS Client feature ($featureName) installed successfully" -Level 'SUCCESS' -Section "NFS Client Installation"
-                $nfsInstalled = $true
-                $nfsNeedsReboot = $true
-                break
+                    Write-Log "NFS Client feature ($featureName) installed successfully using PowerShell method" -Level 'SUCCESS' -Section "NFS Client Installation"
+                    $nfsInstalled = $true
+                    $nfsNeedsReboot = $true
+                    $installSuccess = $true
+                    break
                 } catch {
-                    $script:ErrorCount++
-                    Write-Log "Failed to install NFS Client feature ($featureName)" -Level 'ERROR' -Section "NFS Client Installation" -Exception $_
+                    # If COM exception (Class not registered), try DISM as fallback
+                    if ($_.Exception.Message -match "Class not registered" -or $_.Exception -is [System.Runtime.InteropServices.COMException]) {
+                        Write-Log "PowerShell method failed with COM exception. Trying DISM as fallback..." -Level 'WARNING' -Section "NFS Client Installation"
+                        try {
+                            # Use DISM to enable the feature
+                            $dismResult = dism.exe /Online /Enable-Feature /FeatureName:$featureName /All /NoRestart 2>&1 | Out-String
+                            $dismExitCode = $LASTEXITCODE
+                            
+                            if ($dismExitCode -eq 0 -or $dismResult -match "completed successfully" -or $dismResult -match "The operation completed successfully") {
+                                Write-Log "NFS Client feature ($featureName) installed successfully using DISM" -Level 'SUCCESS' -Section "NFS Client Installation"
+                                $nfsInstalled = $true
+                                $nfsNeedsReboot = $true
+                                $installSuccess = $true
+                                break
+                            } else {
+                                Write-Log "DISM installation attempt failed. Exit code: $dismExitCode" -Level 'WARNING' -Section "NFS Client Installation"
+                                Write-Log "DISM output: $dismResult" -Level 'INFO' -Section "NFS Client Installation"
+                            }
+                        } catch {
+                            Write-Log "DISM fallback also failed: $_" -Level 'WARNING' -Section "NFS Client Installation"
+                        }
+                    } else {
+                        # Other error, log it
+                        $script:ErrorCount++
+                        Write-Log "Failed to install NFS Client feature ($featureName)" -Level 'ERROR' -Section "NFS Client Installation" -Exception $_
+                    }
                 }
             }
         }
@@ -2105,6 +2133,27 @@ else {
         } else {
             $script:ErrorCount++
             Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
+            
+            # Provide detailed error information
+            if ($errorText) {
+                Write-Log "Error details have been logged above. Review the WINGET ERROR section for specific failure information." -Level 'ERROR' -Section "Dev Flows Installation"
+            } else {
+                Write-Log "No error output captured. This may indicate a silent failure or process termination." -Level 'WARNING' -Section "Dev Flows Installation"
+            }
+            
+            # Common error code meanings
+            if ($exitCode -eq -1978286075) {
+                Write-Log "Exit code -1978286075 typically indicates a configuration processing error or package installation failure." -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "This may be caused by: package download failure, installation conflict, or DSC resource error." -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "Check the WINGET OUTPUT and WINGET ERROR sections above for specific package or resource that failed." -Level 'INFO' -Section "Dev Flows Installation"
+            }
+            
+            # Suggest troubleshooting steps
+            Write-Log "Troubleshooting steps:" -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Log "1. Review the WINGET ERROR output above to identify which package/resource failed" -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Log "2. Try running the failed package installation manually: winget install <package-id>" -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Log "3. Check if any packages in the DSC file are already installed and causing conflicts" -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Log "4. Verify network connectivity if package downloads are failing" -Level 'WARNING' -Section "Dev Flows Installation"
         }
         
         # Log summary of packages processed
