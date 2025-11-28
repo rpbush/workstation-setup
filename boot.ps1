@@ -307,6 +307,88 @@ function Test-WinGetInstalled {
     }
 }
 
+# Helper function to ensure WinGet configuration is enabled
+# This function verifies configuration is enabled by actually testing it
+function Ensure-WinGetConfigurationEnabled {
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$Section = ''
+    )
+    
+    $maxRetries = 2
+    $retryCount = 0
+    
+    while ($retryCount -lt $maxRetries) {
+        # Test if configuration is actually enabled by trying a valid command
+        # We'll use 'winget configure list' which should work if enabled, or return an error if not
+        try {
+            # Capture both stdout and stderr (2>&1 redirects stderr to stdout)
+            $testOutput = winget configure list 2>&1 | Out-String
+            $testOutputLower = $testOutput.ToLower()
+            
+            # Check for the error message (case-insensitive)
+            # The error message is: "Extended features are not enabled. Run `winget configure --enable` to enable them."
+            $needsEnable = $testOutputLower -match "extended features are not enabled" -or 
+                          $testOutputLower -match "run.*winget configure.*--enable"
+            
+            if ($needsEnable) {
+                Write-Log "WinGet configuration features are not enabled. Enabling them (attempt $($retryCount + 1))..." -Level 'INFO' -Section $Section
+                
+                # Enable configuration features
+                $tempOutput = [System.IO.Path]::GetTempFileName()
+                $tempError = [System.IO.Path]::GetTempFileName()
+                
+                $process = Start-Process -FilePath "winget.exe" -ArgumentList "configure", "--enable" -NoNewWindow -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction Stop -Wait
+                
+                $enableOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+                $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                
+                Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+                Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+                
+                # Wait a moment for the change to take effect (even if exit code suggests failure)
+                # Sometimes the enable command returns non-zero exit codes but still succeeds
+                Start-Sleep -Seconds 3
+                
+                # Always verify by testing if configuration is actually enabled now
+                # This is more reliable than checking exit codes
+                $verifyOutput = winget configure list 2>&1 | Out-String
+                $verifyOutputLower = $verifyOutput.ToLower()
+                if ($verifyOutputLower -notmatch "extended features are not enabled") {
+                    Write-Log "WinGet configuration features enabled and verified successfully" -Level 'SUCCESS' -Section $Section
+                    return $true
+                } else {
+                    # Verification failed - log details for troubleshooting
+                    if ($process.ExitCode -ne 0) {
+                        Write-Log "Enable command returned exit code: $($process.ExitCode) (may still have succeeded)" -Level 'WARNING' -Section $Section
+                    }
+                    if ($enableOutput) {
+                        Write-Log "Enable output: $enableOutput" -Level 'INFO' -Section $Section
+                    }
+                    if ($errorOutput) {
+                        Write-Log "Enable error output: $errorOutput" -Level 'INFO' -Section $Section
+                    }
+                    Write-Log "WinGet configuration enable command completed but verification failed. Retrying..." -Level 'WARNING' -Section $Section
+                }
+            } else {
+                # Configuration appears to be enabled
+                Write-Log "WinGet configuration features are enabled" -Level 'SUCCESS' -Section $Section
+                return $true
+            }
+        } catch {
+            Write-Log "Exception while checking/enabling WinGet configuration: $_" -Level 'ERROR' -Section $Section -Exception $_
+        }
+        
+        $retryCount++
+        if ($retryCount -lt $maxRetries) {
+            Start-Sleep -Seconds 3
+        }
+    }
+    
+    Write-Log "Failed to enable WinGet configuration features after $maxRetries attempts" -Level 'ERROR' -Section $Section
+    return $false
+}
+
 # Check if WinGet is already installed and working
 # Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
 Start-Section "WinGet Check"
@@ -417,84 +499,11 @@ if (-not $skipWinGetInstall) {
 # ---------------
 # Enable WinGet Configuration Features (required for DSC files)
 Start-Section "WinGet Configuration Enable"
-try {
-    Write-Log "Checking if WinGet configuration features are enabled..." -Level 'INFO' -Section "WinGet Configuration Enable"
-    
-    # Check if configuration is already enabled by trying to get configuration status (with timeout)
-    $configCheck = $null
-    $configCheckJob = Start-Job -ScriptBlock { winget configure --info 2>&1 | Out-String }
-    $configCheckResult = $configCheckJob | Wait-Job -Timeout 10 | Receive-Job
-    $configCheckJob | Remove-Job -Force -ErrorAction SilentlyContinue
-    
-    if ($configCheckResult) {
-        $configCheck = $configCheckResult
-    }
-    
-    $configEnabled = $configCheck -and $configCheck -notmatch "Extended features are not enabled"
-    
-    if (-not $configEnabled) {
-        Write-Log "WinGet configuration features are not enabled. Enabling them..." -Level 'INFO' -Section "WinGet Configuration Enable"
-        
-        # Enable configuration features using Start-Process with timeout to prevent hanging
-        $enableStart = Get-Date
-        $tempOutput = [System.IO.Path]::GetTempFileName()
-        $tempError = [System.IO.Path]::GetTempFileName()
-        
-        $process = Start-Process -FilePath "winget.exe" -ArgumentList "configure", "--enable" -NoNewWindow -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction Stop
-        
-        # Wait for process with timeout (max 2 minutes)
-        $timeoutSeconds = 120
-        $timeoutReached = $false
-        $elapsed = 0
-        while (-not $process.HasExited) {
-            Start-Sleep -Seconds 1
-            $elapsed = ((Get-Date) - $enableStart).TotalSeconds
-            if ($elapsed -ge $timeoutSeconds) {
-                $timeoutReached = $true
-                break
-            }
-        }
-        
-        if ($timeoutReached -or (-not $process.HasExited)) {
-            Write-Log "winget configure --enable exceeded timeout of $timeoutSeconds seconds. Terminating..." -Level 'WARNING' -Section "WinGet Configuration Enable"
-            try {
-                if (-not $process.HasExited) {
-                    $process.Kill()
-                }
-            } catch {
-                # Ignore errors killing process
-            }
-            $enableExitCode = -1
-            $enableOutput = "Process timed out after $timeoutSeconds seconds"
-        } else {
-            $enableExitCode = $process.ExitCode
-            $enableOutput = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-            $errorOutput = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
-            if ($errorOutput) {
-                $enableOutput += "`nError: $errorOutput"
-            }
-        }
-        
-        Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
-        Remove-Item $tempError -Force -ErrorAction SilentlyContinue
-        
-        if ($enableExitCode -eq 0) {
-            Write-Log "WinGet configuration features enabled successfully" -Level 'SUCCESS' -Section "WinGet Configuration Enable"
-        } else {
-            $script:ErrorCount++
-            Write-Log "Failed to enable WinGet configuration features (Exit code: $enableExitCode)" -Level 'ERROR' -Section "WinGet Configuration Enable"
-            if ($enableOutput) {
-                Write-Log "Output: $enableOutput" -Level 'ERROR' -Section "WinGet Configuration Enable"
-            }
-            Write-Log "DSC configurations may fail. You may need to run 'winget configure --enable' manually." -Level 'WARNING' -Section "WinGet Configuration Enable"
-        }
-    } else {
-        Write-Log "WinGet configuration features are already enabled" -Level 'INFO' -Section "WinGet Configuration Enable"
-    }
-} catch {
+$configEnabled = Ensure-WinGetConfigurationEnabled -Section "WinGet Configuration Enable"
+if (-not $configEnabled) {
     $script:ErrorCount++
-    Write-Log "Exception while enabling WinGet configuration features" -Level 'ERROR' -Section "WinGet Configuration Enable" -Exception $_
-    Write-Log "DSC configurations may fail. You may need to run 'winget configure --enable' manually." -Level 'WARNING' -Section "WinGet Configuration Enable"
+    Write-Log "WinGet configuration features could not be enabled. DSC configurations may fail." -Level 'ERROR' -Section "WinGet Configuration Enable"
+    Write-Log "You may need to run 'winget configure --enable' manually as Administrator." -Level 'WARNING' -Section "WinGet Configuration Enable"
 }
 End-Section "WinGet Configuration Enable"
 
@@ -1532,21 +1541,29 @@ else {
     }
     
     if ($officeDscDownloaded) {
-            try {
-                Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
-                $configStart = Get-Date
-                $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
+            # Ensure WinGet configuration is enabled before running DSC
+            Write-Log "Verifying WinGet configuration is enabled before Office DSC..." -Level 'INFO' -Section "Office Installation"
+            $configEnabled = Ensure-WinGetConfigurationEnabled -Section "Office Installation"
+            if (-not $configEnabled) {
+                $script:ErrorCount++
+                Write-Log "Cannot proceed with Office DSC - WinGet configuration features are not enabled" -Level 'ERROR' -Section "Office Installation"
+            } else {
+                try {
+                    Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
+                    $configStart = Get-Date
+                    $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
                 $configDuration = (Get-Date) - $configStart
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
-                } else {
+                    } else {
+                        $script:ErrorCount++
+                        Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
+                        Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+                    }
+                } catch {
                     $script:ErrorCount++
-                    Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
-                    Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+                    Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
                 }
-            } catch {
-                $script:ErrorCount++
-                Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
             } 
         
         if (Test-Path $dscOffice) {
@@ -1816,6 +1833,16 @@ else {
     if (-not (Test-Path $dscAdmin)) {
         $script:ErrorCount++
         Write-Log "DSC file does not exist: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation"
+        End-Section "Dev Flows Installation"
+        return
+    }
+    
+    # Ensure WinGet configuration is enabled before running DSC
+    Write-Log "Verifying WinGet configuration is enabled before Dev flows DSC..." -Level 'INFO' -Section "Dev Flows Installation"
+    $configEnabled = Ensure-WinGetConfigurationEnabled -Section "Dev Flows Installation"
+    if (-not $configEnabled) {
+        $script:ErrorCount++
+        Write-Log "Cannot proceed with Dev flows DSC - WinGet configuration features are not enabled" -Level 'ERROR' -Section "Dev Flows Installation"
         End-Section "Dev Flows Installation"
         return
     }
