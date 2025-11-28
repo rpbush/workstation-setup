@@ -1175,24 +1175,71 @@ else {
         Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
         
         # Check if NFS Client service is running
-        $nfsService = Get-Service -Name "NfsClnt" -ErrorAction SilentlyContinue
+        # Try multiple possible service names (varies by Windows version and NFS feature installed)
+        $nfsServiceNames = @("NfsClnt", "NfsRdr", "NfsService")
+        $nfsService = $null
+        $nfsServiceName = $null
+        
+        foreach ($serviceName in $nfsServiceNames) {
+            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            if ($service) {
+                $nfsService = $service
+                $nfsServiceName = $serviceName
+                break
+            }
+        }
+        
         if ($nfsService) {
             if ($nfsService.Status -ne "Running") {
-                Write-Log "NFS Client service is not running. Attempting to start it..." -Level 'WARNING' -Section "Network Drive Mapping"
+                Write-Log "NFS Client service ($nfsServiceName) is not running. Attempting to start it..." -Level 'WARNING' -Section "Network Drive Mapping"
+                $serviceStarted = $false
+                
+                # Try using nfsadmin command first (more reliable for NFS)
                 try {
-                    Start-Service -Name "NfsClnt" -ErrorAction Stop
-                    Write-Log "NFS Client service started successfully" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                    Start-Sleep -Seconds 2
+                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "NFS Client service started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        $serviceStarted = $true
+                        Start-Sleep -Seconds 3
+                    }
                 } catch {
-                    $script:WarningCount++
-                    Write-Log "Failed to start NFS Client service: $_" -Level 'WARNING' -Section "Network Drive Mapping"
+                    # nfsadmin not available or failed, try Start-Service
+                }
+                
+                # If nfsadmin didn't work, try Start-Service
+                if (-not $serviceStarted) {
+                    try {
+                        Start-Service -Name $nfsServiceName -ErrorAction Stop
+                        Write-Log "NFS Client service ($nfsServiceName) started successfully" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 2
+                    } catch {
+                        $script:WarningCount++
+                        Write-Log "Failed to start NFS Client service ($nfsServiceName): $_" -Level 'WARNING' -Section "Network Drive Mapping"
+                        Write-Log "You may need to start the service manually or restart the computer if NFS was just installed" -Level 'WARNING' -Section "Network Drive Mapping"
+                    }
                 }
             } else {
-                Write-Log "NFS Client service is running" -Level 'INFO' -Section "Network Drive Mapping"
+                Write-Log "NFS Client service ($nfsServiceName) is running" -Level 'INFO' -Section "Network Drive Mapping"
             }
         } else {
             $script:WarningCount++
-            Write-Log "NFS Client service not found. NFS mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "NFS Client service not found (checked: $($nfsServiceNames -join ', ')). NFS mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "This may indicate that the NFS Client feature is not installed or requires a reboot after installation" -Level 'WARNING' -Section "Network Drive Mapping"
+            
+            # Try to use nfsadmin to check if NFS is available at all
+            try {
+                $nfsAdminCheck = nfsadmin client 2>&1 | Out-String
+                if ($nfsAdminCheck -notmatch "not recognized" -and $nfsAdminCheck -notmatch "not found") {
+                    Write-Log "nfsadmin command is available. Attempting to start NFS client using nfsadmin..." -Level 'INFO' -Section "Network Drive Mapping"
+                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "NFS Client started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 3
+                    }
+                }
+            } catch {
+                # nfsadmin not available
+            }
         }
         
         # Remove existing mapping if it exists
@@ -1271,8 +1318,23 @@ else {
             $script:ErrorCount++
             Write-Log "Failed to map $nDrive to $nPath (Exit code: $mapExitCode)" -Level 'ERROR' -Section "Network Drive Mapping"
             Write-Log "Error output: $mapOutput" -Level 'ERROR' -Section "Network Drive Mapping"
-            Write-Log "Troubleshooting: Check that NFS server is accessible, NFS Client service is running, and path format is correct" -Level 'WARNING' -Section "Network Drive Mapping"
-            Write-Log "NFS path format should be: NFS:/server/share or \\server\share" -Level 'WARNING' -Section "Network Drive Mapping"
+            
+            # Provide detailed troubleshooting information
+            Write-Log "Troubleshooting NFS mapping failure:" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "1. Verify NFS Client feature is installed: Get-WindowsOptionalFeature -Online | Where-Object {`$_.FeatureName -like '*NFS*'}" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "2. Check NFS Client service status: Get-Service | Where-Object {`$_.Name -like '*NFS*'}" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "3. Try starting NFS client manually: nfsadmin client start" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "4. Verify NFS server is accessible and path format is correct" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "5. NFS path format should be: NFS:/server/share (not \\server\share for NFS)" -Level 'WARNING' -Section "Network Drive Mapping"
+            Write-Log "6. If NFS was just installed, a reboot may be required" -Level 'WARNING' -Section "Network Drive Mapping"
+            
+            # Check if service is actually running now
+            $currentService = Get-Service | Where-Object { $_.Name -like "*NFS*" -or $_.DisplayName -like "*NFS*" } | Select-Object -First 1
+            if ($currentService) {
+                Write-Log "Current NFS service status: $($currentService.Name) - $($currentService.Status)" -Level 'INFO' -Section "Network Drive Mapping"
+            } else {
+                Write-Log "No NFS services found. NFS Client feature may not be installed." -Level 'WARNING' -Section "Network Drive Mapping"
+            }
         }
         
         # Map S: drive to \\FS-1\Storage (Windows Network)
