@@ -1123,24 +1123,26 @@ End-Section "Windows HWID Activation"
 
 # Try to use local DSC files first, then fall back to GitHub
 $scriptDir = Split-Path $mypath -Parent
-$dscNonAdmin = "rpbush.nonAdmin.dsc.yml";
-$dscAdmin = "rpbush.dev.dsc.yml";
-$dscAdminNoDrive = "rpbush.dev.nodrive.dsc.yml";  # DSC file without Dev Drive resource
-$dscOffice = "rpbush.office.dsc.yml";
+# CRITICAL: Use $env:TEMP for DSC files to avoid saving to System32 when running from RunOnce
+$dscNonAdmin = Join-Path $env:TEMP "rpbush.nonAdmin.dsc.yml"
+$dscAdmin = Join-Path $env:TEMP "rpbush.dev.dsc.yml"
+$dscAdminNoDrive = Join-Path $env:TEMP "rpbush.dev.nodrive.dsc.yml"  # DSC file without Dev Drive resource
+$dscOffice = Join-Path $env:TEMP "rpbush.office.dsc.yml"
 
-# Check if DSC files exist locally
-$dscNonAdminLocal = Join-Path $scriptDir $dscNonAdmin
-$dscAdminLocal = Join-Path $scriptDir $dscAdmin
-$dscAdminNoDriveLocal = Join-Path $scriptDir $dscAdminNoDrive
-$dscOfficeLocal = Join-Path $scriptDir $dscOffice
+# Check if DSC files exist locally (in script directory)
+$dscNonAdminLocal = Join-Path $scriptDir "rpbush.nonAdmin.dsc.yml"
+$dscAdminLocal = Join-Path $scriptDir "rpbush.dev.dsc.yml"
+$dscAdminNoDriveLocal = Join-Path $scriptDir "rpbush.dev.nodrive.dsc.yml"
+$dscOfficeLocal = Join-Path $scriptDir "rpbush.office.dsc.yml"
 
 # GitHub repository for DSC files (use workstation-setup repo which contains the files)
 $dscUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/"
 
-$dscOfficeUri = $dscUri + $dscOffice;
-$dscNonAdminUri = $dscUri + $dscNonAdmin 
-$dscAdminUri = $dscUri + $dscAdmin
-$dscAdminNoDriveUri = $dscUri + $dscAdminNoDrive
+# Use just the filename for URIs (not the full temp path)
+$dscOfficeUri = $dscUri + "rpbush.office.dsc.yml"
+$dscNonAdminUri = $dscUri + "rpbush.nonAdmin.dsc.yml"
+$dscAdminUri = $dscUri + "rpbush.dev.dsc.yml"
+$dscAdminNoDriveUri = $dscUri + "rpbush.dev.nodrive.dsc.yml"
 
 # ============================================================================
 # PHASE 1: PREREQUISITES & REBOOT HANDLING
