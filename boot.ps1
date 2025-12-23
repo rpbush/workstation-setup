@@ -108,6 +108,147 @@ $script:SuccessCount = 0
 $script:SectionResults = @{}  # Track success/failure status for each section
 $script:SectionTimings = @{}
 
+# Helper function to clean up MDM failed registry attempts
+function Clear-MDMFailedRegistryAttempts {
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$Section = ''
+    )
+    
+    try {
+        Write-Log "Cleaning up MDM failed registry attempts..." -Level 'INFO' -Section $Section
+        Write-Host "  → Cleaning up MDM failed registry attempts..." -ForegroundColor Gray
+        
+        $cleanedCount = 0
+        
+        # Clean up failed MDM policy application attempts in PolicyManager
+        $policyManagerPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager"
+        if (Test-Path $policyManagerPath) {
+            try {
+                # Look for policy application errors/failures
+                $policyKeys = Get-ChildItem -Path $policyManagerPath -Recurse -ErrorAction SilentlyContinue | Where-Object {
+                    $keyName = $_.PSChildName
+                    # Look for keys with error/failure indicators in their name or properties
+                    if ($keyName -match "Failed|Error|Pending|Retry") {
+                        return $true
+                    }
+                    
+                    # Check properties for failure indicators
+                    try {
+                        $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+                        if ($props) {
+                            $propNames = $props.PSObject.Properties.Name
+                            foreach ($propName in $propNames) {
+                                if ($propName -match "Status|State|Error|Failed" -and $props.$propName -match "Failed|Error|0x[0-9A-Fa-f]{8}") {
+                                    return $true
+                                }
+                            }
+                        }
+                    } catch {
+                        # Ignore errors reading properties
+                    }
+                    return $false
+                }
+                
+                foreach ($key in $policyKeys) {
+                    try {
+                        # Double-check it's actually a failure before removing
+                        $keyProps = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
+                        $shouldRemove = $false
+                        
+                        if ($keyProps) {
+                            # Check for explicit failure states
+                            if ($keyProps.PSObject.Properties.Name -contains "Status" -and $keyProps.Status -eq "Failed") {
+                                $shouldRemove = $true
+                            }
+                            if ($keyProps.PSObject.Properties.Name -contains "State" -and $keyProps.State -eq "Failed") {
+                                $shouldRemove = $true
+                            }
+                            if ($keyProps.PSObject.Properties.Name -contains "LastError" -and $keyProps.LastError -ne $null -and $keyProps.LastError -ne 0) {
+                                $shouldRemove = $true
+                            }
+                        }
+                        
+                        # Also check if key name indicates failure
+                        if ($key.PSChildName -match "Failed|Error") {
+                            $shouldRemove = $true
+                        }
+                        
+                        if ($shouldRemove) {
+                            Remove-Item -Path $key.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            $cleanedCount++
+                            Write-Log "Removed MDM failed registry key: $($key.PSPath)" -Level 'INFO' -Section $Section
+                        }
+                    } catch {
+                        Write-Log "Could not remove MDM registry key $($key.PSPath): $_" -Level 'WARNING' -Section $Section
+                    }
+                }
+            } catch {
+                Write-Log "Error processing PolicyManager path: $_" -Level 'WARNING' -Section $Section
+            }
+        }
+        
+        # Clean up failed MDM enrollment attempts (only if explicitly marked as failed)
+        $enrollmentPath = "HKLM:\SOFTWARE\Microsoft\Enrollments"
+        if (Test-Path $enrollmentPath) {
+            try {
+                $enrollments = Get-ChildItem -Path $enrollmentPath -ErrorAction SilentlyContinue
+                foreach ($enrollment in $enrollments) {
+                    try {
+                        $enrollmentProps = Get-ItemProperty -Path $enrollment.PSPath -ErrorAction SilentlyContinue
+                        if ($enrollmentProps) {
+                            # Only remove if explicitly marked as failed and not active
+                            $isFailed = $false
+                            $isActive = $false
+                            
+                            if ($enrollmentProps.PSObject.Properties.Name -contains "EnrollmentState") {
+                                if ($enrollmentProps.EnrollmentState -eq "Failed") {
+                                    $isFailed = $true
+                                } elseif ($enrollmentProps.EnrollmentState -eq "Enrolled" -or $enrollmentProps.EnrollmentState -eq "Enrolling") {
+                                    $isActive = $true
+                                }
+                            }
+                            
+                            if ($enrollmentProps.PSObject.Properties.Name -contains "EnrollmentStatus") {
+                                if ($enrollmentProps.EnrollmentStatus -eq "Failed") {
+                                    $isFailed = $true
+                                } elseif ($enrollmentProps.EnrollmentStatus -eq "Enrolled" -or $enrollmentProps.EnrollmentStatus -eq "Enrolling") {
+                                    $isActive = $true
+                                }
+                            }
+                            
+                            # Only remove if failed and not active
+                            if ($isFailed -and -not $isActive) {
+                                Remove-Item -Path $enrollment.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                $cleanedCount++
+                                Write-Log "Removed failed MDM enrollment: $($enrollment.PSPath)" -Level 'INFO' -Section $Section
+                            }
+                        }
+                    } catch {
+                        Write-Log "Could not process MDM enrollment $($enrollment.PSPath): $_" -Level 'WARNING' -Section $Section
+                    }
+                }
+            } catch {
+                Write-Log "Error processing enrollment path: $_" -Level 'WARNING' -Section $Section
+            }
+        }
+        
+        if ($cleanedCount -gt 0) {
+            Write-Log "Cleaned up $cleanedCount MDM failed registry attempts" -Level 'SUCCESS' -Section $Section
+            Write-Host "  ✓ Cleaned up $cleanedCount MDM failed registry attempts" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Log "No MDM failed registry attempts found to clean up" -Level 'INFO' -Section $Section
+            Write-Host "  ✓ No MDM failed registry attempts found" -ForegroundColor Green
+            return $false
+        }
+    } catch {
+        Write-Log "Error cleaning up MDM failed registry attempts: $_" -Level 'WARNING' -Section $Section
+        Write-Host "  ⚠ Error cleaning up MDM registry: $_" -ForegroundColor Yellow
+        return $false
+    }
+}
+
 # Helper function to check if Windows feature is installed
 function Test-WindowsFeatureInstalled {
     param(
@@ -1704,7 +1845,36 @@ else {
     New-Item -Path 'HKCU:\Software\Microsoft\Office\16.0\Outlook\AutoDiscover' -Force
     New-ItemProperty -Path 'HKCU:\Software\Microsoft\Office\16.0\Outlook\AutoDiscover' -Name 'ZeroConfigExchange' -Value "1" -PropertyType DWORD -Force
 
-    gpupdate /force
+    # Run gpupdate and check for MDM failures
+    Write-Host "`n[STEP] Group Policy Update - Applying policy changes..." -ForegroundColor Cyan
+    Write-Host "  → Running gpupdate /force..." -ForegroundColor Gray
+    Start-Section "Group Policy Update"
+    
+    try {
+        $gpupdateOutput = gpupdate /force 2>&1 | Out-String
+        Write-Log "Group Policy update completed" -Level 'INFO' -Section "Group Policy Update"
+        Write-Host "  ✓ Group Policy update completed" -ForegroundColor Green
+        
+        # Check for MDM failures in the output
+        if ($gpupdateOutput -match "MDM.*failed|failed.*MDM|MDM Policy.*failed|Windows failed to apply the MDM") {
+            Write-Log "MDM failure detected in gpupdate output" -Level 'WARNING' -Section "Group Policy Update"
+            Write-Host "  ⚠ MDM failure detected in Group Policy update" -ForegroundColor Yellow
+            Write-Host "  → Cleaning up MDM failed registry attempts..." -ForegroundColor Gray
+            
+            $cleaned = Clear-MDMFailedRegistryAttempts -Section "Group Policy Update"
+            if ($cleaned) {
+                Write-Host "  ✓ MDM cleanup completed" -ForegroundColor Green
+                $script:SuccessCount++
+            }
+        } else {
+            Write-Log "No MDM failures detected in gpupdate output" -Level 'INFO' -Section "Group Policy Update"
+        }
+    } catch {
+        Write-Log "Error running gpupdate: $_" -Level 'WARNING' -Section "Group Policy Update" -Exception $_
+        Write-Host "  ⚠ Error running gpupdate: $_" -ForegroundColor Yellow
+    }
+    
+    End-Section "Group Policy Update"
 
     Start-Section "Office Installation"
     Write-Host "`n[STEP] Office Installation - Checking if Office is already installed..." -ForegroundColor Cyan
