@@ -1506,40 +1506,93 @@ Write-Log "========================================" -Level 'INFO'
         }
         
         # List installed distributions and check for Ubuntu
+        # WSL distributions are user-specific, so when running as admin (SYSTEM), 
+        # we need to check/install in the logged-in user's context
         Write-Host "Checking installed WSL distributions..."
         $ubuntuInstalled = $false
+        $isRunningAsSystem = ($env:USERNAME -eq "SYSTEM")
+        
         try {
-            $wslList = wsl --list --verbose 2>$null
-            if ($wslList) {
-                Write-Host "Installed WSL distributions:"
-                $wslList | ForEach-Object { Write-Host "  $_" }
-                # Check if Ubuntu is already installed
-                if ($wslList -match "Ubuntu") {
-                    $ubuntuInstalled = $true
-                    Write-Host "Ubuntu is already installed"
-                    $script:AlreadySetItems += "WSL Ubuntu"
+            if ($isRunningAsSystem) {
+                # Running as SYSTEM/admin - WSL distributions are user-specific
+                # Get the logged-in user to check their WSL distributions
+                $loggedInUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
+                if ($loggedInUser -and $loggedInUser -ne "SYSTEM") {
+                    $username = $loggedInUser.Split('\')[-1]
+                    Write-Log "Running as SYSTEM - checking WSL distributions for logged-in user: $username" -Level 'INFO' -Section "WSL Installation"
+                    Write-Host "Note: Checking WSL distributions for user: $username"
+                    
+                    # Create a temporary script to run wsl --list as the logged-in user
+                    $tempScript = Join-Path $env:TEMP "check-wsl-ubuntu.ps1"
+                    $checkScript = @"
+`$wslList = wsl --list 2>`$null
+if (`$wslList -match 'Ubuntu') {
+    Write-Output 'UBUNTU_FOUND'
+} else {
+    Write-Output 'UBUNTU_NOT_FOUND'
+}
+"@
+                    $checkScript | Out-File -FilePath $tempScript -Encoding UTF8 -Force
+                    
+                    # Try to run as the logged-in user using runas (requires password, so may not work)
+                    # Instead, just note that Ubuntu check needs to happen at user level
+                    Write-Host "WSL distributions are user-specific. Ubuntu check should be done at user level."
+                    Write-Host "If Ubuntu is already installed, it will be detected when running at user level."
+                    Write-Log "Skipping Ubuntu check when running as SYSTEM (user-specific)" -Level 'INFO' -Section "WSL Installation"
+                } else {
+                    Write-Host "Could not determine logged-in user. Ubuntu check skipped."
+                    Write-Log "Could not determine logged-in user for WSL check" -Level 'WARNING' -Section "WSL Installation"
+                }
+            } else {
+                # Running in user context - can check directly
+                Write-Log "Running in user context - checking WSL distributions directly" -Level 'INFO' -Section "WSL Installation"
+                $wslListOutput = wsl --list 2>$null | Out-String
+                if ($wslListOutput) {
+                    Write-Host "Installed WSL distributions:"
+                    $wslListOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-Host "  $_" }
+                    # Check if Ubuntu is already installed (case-insensitive)
+                    if ($wslListOutput -match "Ubuntu" -or $wslListOutput -match "ubuntu") {
+                        $ubuntuInstalled = $true
+                        Write-Host "Ubuntu is already installed"
+                        $script:AlreadySetItems += "WSL Ubuntu"
+                    }
+                } else {
+                    Write-Host "No WSL distributions found or WSL not yet available"
                 }
             }
         } catch {
             Write-Host "No WSL distributions found or WSL not yet available"
+            Write-Log "Error checking WSL distributions: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
         }
         
         # Install Ubuntu if WSL is installed but Ubuntu is not
+        # Note: Ubuntu installation must be done at user level, not admin level
         if ($wslInstalled -and -not $ubuntuInstalled) {
-            Write-Host "WSL is installed but Ubuntu is not. Installing Ubuntu..."
-            try {
-                $ubuntuInstallOutput = wsl --install ubuntu 2>&1
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "Ubuntu installation initiated successfully"
-                    $script:InstalledItems += "WSL Ubuntu"
-                } else {
-                    Write-Log "Ubuntu installation may require user interaction or a reboot" -Level 'WARNING' -Section "WSL Installation"
-                    Write-Host "Note: Ubuntu installation may require user interaction or a system restart"
-                }
-            } catch {
+            if ($isRunningAsSystem) {
+                # Running as SYSTEM - Ubuntu installation must happen at user level
+                Write-Host "WSL is installed but Ubuntu check/install must be done at user level."
+                Write-Host "Please run 'wsl --install ubuntu' manually in a user context, or"
+                Write-Host "the script will attempt to install it when run at user level."
+                Write-Log "Skipping Ubuntu installation when running as SYSTEM (user-specific operation)" -Level 'WARNING' -Section "WSL Installation"
                 $script:WarningCount++
-                Write-Log "Failed to install Ubuntu: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
-                Write-Host "You can install Ubuntu manually using: wsl --install ubuntu"
+            } else {
+                # Running in user context - can install directly
+                Write-Host "WSL is installed but Ubuntu is not. Installing Ubuntu..."
+                Write-Log "Installing Ubuntu (running in user context)" -Level 'INFO' -Section "WSL Installation"
+                try {
+                    $ubuntuInstallOutput = wsl --install ubuntu 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "Ubuntu installation initiated successfully"
+                        $script:InstalledItems += "WSL Ubuntu"
+                    } else {
+                        Write-Log "Ubuntu installation may require user interaction or a reboot" -Level 'WARNING' -Section "WSL Installation"
+                        Write-Host "Note: Ubuntu installation may require user interaction or a system restart"
+                    }
+                } catch {
+                    $script:WarningCount++
+                    Write-Log "Failed to install Ubuntu: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
+                    Write-Host "You can install Ubuntu manually using: wsl --install ubuntu"
+                }
             }
         }
         
