@@ -1147,15 +1147,12 @@ End-Section "Windows HWID Activation"
 # Try to use local DSC files first, then fall back to GitHub
 $scriptDir = Split-Path $mypath -Parent
 # CRITICAL: Use $env:TEMP for DSC files to avoid saving to System32 when running from RunOnce
-$dscNonAdmin = Join-Path $env:TEMP "rpbush.nonAdmin.dsc.yml"
+# Only reference DSC files that actually exist in the repository
 $dscAdmin = Join-Path $env:TEMP "rpbush.dev.dsc.yml"
-$dscAdminNoDrive = Join-Path $env:TEMP "rpbush.dev.nodrive.dsc.yml"  # DSC file without Dev Drive resource
 $dscOffice = Join-Path $env:TEMP "rpbush.office.dsc.yml"
 
 # Check if DSC files exist locally (in script directory)
-$dscNonAdminLocal = Join-Path $scriptDir "rpbush.nonAdmin.dsc.yml"
 $dscAdminLocal = Join-Path $scriptDir "rpbush.dev.dsc.yml"
-$dscAdminNoDriveLocal = Join-Path $scriptDir "rpbush.dev.nodrive.dsc.yml"
 $dscOfficeLocal = Join-Path $scriptDir "rpbush.office.dsc.yml"
 
 # GitHub repository for DSC files (use workstation-setup repo which contains the files)
@@ -1163,9 +1160,7 @@ $dscUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/"
 
 # Use just the filename for URIs (not the full temp path)
 $dscOfficeUri = $dscUri + "rpbush.office.dsc.yml"
-$dscNonAdminUri = $dscUri + "rpbush.nonAdmin.dsc.yml"
 $dscAdminUri = $dscUri + "rpbush.dev.dsc.yml"
-$dscAdminNoDriveUri = $dscUri + "rpbush.dev.nodrive.dsc.yml"
 
 # ============================================================================
 # PHASE 1: PREREQUISITES & REBOOT HANDLING
@@ -1187,65 +1182,8 @@ if (-not $ResumeAfterReboot) {
         # Terminal may not be installed yet, continue
     }
 
-    Start-Section "NonAdmin DSC Installation"
-    $nonAdminDscDownloaded = $false
-    
-    # Check if file exists locally first
-    if (Test-Path $dscNonAdminLocal) {
-        Write-Log "Using local NonAdmin DSC file: $dscNonAdminLocal" -Level 'INFO' -Section "NonAdmin DSC Installation"
-        Copy-Item $dscNonAdminLocal $dscNonAdmin -Force
-        $nonAdminDscDownloaded = $true
-    } else {
-        try {
-            Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
-            $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
-            $downloadDuration = (Get-Date) - $downloadStart
-            Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
-            $nonAdminDscDownloaded = $true
-        } catch {
-            # NonAdmin DSC file doesn't exist in repo - this is optional, so don't count as error
-            $httpStatus = $null
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                $httpStatus = [int]$_.Exception.Response.StatusCode
-            }
-            
-            if ($httpStatus -eq 404) {
-                Write-Log "NonAdmin DSC file not found (404). Skipping NonAdmin install for this run." -Level 'WARNING' -Section "NonAdmin DSC Installation"
-                Write-Host "  ⚠ NonAdmin DSC file not found in repository (optional - skipping)" -ForegroundColor Yellow
-                # Do NOT increment ErrorCount for 404s - this is a soft failure
-            } else {
-                # Other HTTP errors are still warnings, not errors (file is optional)
-                Write-Log "Failed to download NonAdmin DSC configuration. Skipping NonAdmin setup for this run." -Level 'WARNING' -Section "NonAdmin DSC Installation" -Exception $_
-                Write-Host "  ⚠ NonAdmin DSC download failed (optional - skipping)" -ForegroundColor Yellow
-            }
-        }
-    }
-    
-    if ($nonAdminDscDownloaded) {
-        try {
-            Write-Log "Running winget configuration for NonAdmin DSC" -Level 'INFO' -Section "NonAdmin DSC Installation"
-            $configStart = Get-Date
-            $configOutput = winget configuration -f $dscNonAdmin --accept-configuration-agreements 2>&1
-            $configDuration = (Get-Date) - $configStart
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "NonAdmin DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
-            } else {
-                $script:ErrorCount++
-                Write-Log "NonAdmin DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "NonAdmin DSC Installation"
-                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "NonAdmin DSC Installation"
-            }
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Exception during NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
-        }
-    }
-    End-Section "NonAdmin DSC Installation"
-    
-    # Clean up
-    if (Test-Path $dscNonAdmin) {
-        Remove-Item $dscNonAdmin -Force -ErrorAction SilentlyContinue
-    }
+    # NonAdmin DSC section removed - file does not exist in repository
+    # Only rpbush.dev.dsc.yml and rpbush.office.dsc.yml are available
     
     # Check NFS Client installation - this requires a reboot
     # Note: The NFS section below (line 820+) will be skipped if we handle it here
@@ -2691,16 +2629,17 @@ Write-Log "========================================" -Level 'INFO'
     # --------------------------------------------------------------------------
     # STEP 3: SELECT DSC FILE
     # --------------------------------------------------------------------------
+    # Always use the main dev.dsc.yml file (it exists in the repository)
+    # The Dev Drive resource in the DSC will only succeed if conditions are met
+    # If Dev Drive creation fails, our auto-fallback logic will handle it
+    $dscFileToUse = $dscAdmin
+    $dscFileToUseLocal = $dscAdminLocal
+    $dscFileToUseUri = $dscAdminUri
+    
     if ($useDevDrive) {
-        $dscFileToUse = $dscAdmin
-        $dscFileToUseLocal = $dscAdminLocal
-        $dscFileToUseUri = $dscAdminUri
-        Write-Log "Using Dev Flows DSC file WITH Dev Drive: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "Using Dev Flows DSC file (Dev Drive will be created): $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
     } else {
-        $dscFileToUse = $dscAdminNoDrive
-        $dscFileToUseLocal = $dscAdminNoDriveLocal
-        $dscFileToUseUri = $dscAdminNoDriveUri
-        Write-Log "Using Dev Flows DSC file WITHOUT Dev Drive: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "Using Dev Flows DSC file (Dev Drive resource may fail if not available): $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
     }
     
     # Download or use local file
@@ -2715,34 +2654,11 @@ Write-Log "========================================" -Level 'INFO'
             $downloadDuration = (Get-Date) - $downloadStart
             Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
         } catch {
-            # Handle 404 error for missing nodrive DSC file - fall back to main DSC file
-            $httpStatus = $null
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                $httpStatus = [int]$_.Exception.Response.StatusCode
-            }
-            
-            if ($httpStatus -eq 404 -and $dscFileToUse -match "nodrive") {
-                Write-Log "No-drive DSC file not found on GitHub (404). Falling back to main DSC file..." -Level 'WARNING' -Section "Dev Flows Installation"
-                Write-Host "  ⚠ No-drive DSC not found. Using main DSC file instead..." -ForegroundColor Yellow
-                try {
-                    Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscFileToUse -Force -ErrorAction Stop
-                    $downloadDuration = (Get-Date) - $downloadStart
-                    Write-Log "Main Dev flows DSC downloaded successfully as fallback (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                    Write-Host "  ✓ Main DSC file downloaded as fallback" -ForegroundColor Green
-                } catch {
-                    $script:ErrorCount++
-                    Write-Log "Failed to download fallback Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                    Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-                    End-Section "Dev Flows Installation"
-                    return
-                }
-            } else {
-                $script:ErrorCount++
-                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-                End-Section "Dev Flows Installation"
-                return
-            }
+            $script:ErrorCount++
+            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+            End-Section "Dev Flows Installation"
+            return
         }
     }
     
@@ -2906,77 +2822,11 @@ Write-Log "========================================" -Level 'INFO'
         $configDuration = (Get-Date) - $configStart
         Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
         
-        # Auto-fallback: If Dev Drive creation failed due to "no unallocated space", retry without Dev Drive
-        if ($exitCode -ne 0 -and $useDevDrive -and ($outputText -match "There is no unallocated space available to create the Dev Drive volume" -or $errorText -match "There is no unallocated space available to create the Dev Drive volume")) {
-            Write-Log "Dev Drive DSC failed due to lack of unallocated space. Retrying Dev Flows WITHOUT Dev Drive." -Level 'WARNING' -Section "Dev Flows Installation"
-            Write-Host "  ⚠ Dev Drive creation failed (no unallocated space). Retrying without Dev Drive..." -ForegroundColor Yellow
-            
-            # Point to the no-dev-drive DSC file
-            $dscFileToUseFallback = Join-Path $env:TEMP "rpbush.dev.nodrive.dsc.yml"
-            $dscFileToUseFallbackUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/rpbush.dev.nodrive.dsc.yml"
-            
-            try {
-                Write-Log "Downloading no-dev-drive Dev flows DSC from: $dscFileToUseFallbackUri" -Level 'INFO' -Section "Dev Flows Installation"
-                Invoke-WebRequest -Uri $dscFileToUseFallbackUri -OutFile $dscFileToUseFallback -ErrorAction Stop
-                Write-Log "No-dev-drive Dev flows DSC downloaded successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                
-                # Re-run the configuration without Dev Drive
-                $dscFileToUseFullPath = [System.IO.Path]::GetFullPath($dscFileToUseFallback)
-                Write-Log "Retrying winget configuration without Dev Drive..." -Level 'INFO' -Section "Dev Flows Installation"
-                
-                $tempOutputFile2 = [System.IO.Path]::GetTempFileName()
-                $tempErrorFile2 = [System.IO.Path]::GetTempFileName()
-                
-                $cmdArgs = "/c `"winget configuration -f `"$dscFileToUseFullPath`" --accept-configuration-agreements 2>&1`""
-                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile2 -RedirectStandardError $tempErrorFile2 -Wait
-                
-                $outputText = Get-Content $tempOutputFile2 -Raw -ErrorAction SilentlyContinue
-                $errorText = Get-Content $tempErrorFile2 -Raw -ErrorAction SilentlyContinue
-                $exitCode = $proc.ExitCode
-                
-                # Clean up temp files
-                Remove-Item $tempOutputFile2 -Force -ErrorAction SilentlyContinue
-                Remove-Item $tempErrorFile2 -Force -ErrorAction SilentlyContinue
-                
-                Write-Log "Retry without Dev Drive completed (exit code: $exitCode)" -Level 'INFO' -Section "Dev Flows Installation"
-                
-                # Re-parse output to track packages from the retry
-                if ($outputText) {
-                    $outputLines = $outputText -split "`r?`n"
-                    foreach ($line in $outputLines) {
-                        if ($line -match 'WinGetPackage\s+\[([^\]]+)\]' -or $line -match 'Processing.*\[([^\]]+)\]') {
-                            $packageId = $matches[1]
-                            if ($packageId -and $packageId -notmatch '^\s*$') {
-                                if (-not ($script:InstalledItems -contains $packageId) -and -not ($script:AlreadySetItems -contains $packageId)) {
-                                    # Will be updated based on success/failure
-                                }
-                            }
-                        }
-                        if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
-                            $packageId = $matches[1]
-                            if ($packageId) {
-                                $script:InstalledItems += "Dev Flows: $packageId"
-                            }
-                        }
-                        if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
-                            $packageId = $matches[1]
-                            if ($packageId) {
-                                $script:AlreadySetItems += "Dev Flows: $packageId"
-                            }
-                        }
-                        if ($line -match 'Failed|Error' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
-                            $packageId = $matches[1]
-                            if ($packageId) {
-                                $script:FailedItems += "Dev Flows: $packageId"
-                            }
-                        }
-                    }
-                }
-            } catch {
-                $script:ErrorCount++
-                Write-Log "Retrying Dev Flows without Dev Drive failed." -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                Write-Host "  ✗ Retry without Dev Drive failed" -ForegroundColor Red
-            }
+        # Note: If Dev Drive creation fails, the DSC will still continue with package installation
+        # The Dev Drive resource failure is non-blocking - packages will still be installed
+        if ($exitCode -ne 0 -and ($outputText -match "There is no unallocated space available to create the Dev Drive volume" -or $errorText -match "There is no unallocated space available to create the Dev Drive volume")) {
+            Write-Log "Dev Drive creation failed due to lack of unallocated space, but package installation will continue." -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Host "  ⚠ Dev Drive creation failed (no unallocated space), but packages will still install..." -ForegroundColor Yellow
         }
         
         if ($exitCode -eq 0) {
