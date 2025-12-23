@@ -573,12 +573,107 @@ function End-Section {
     }
 }
 
+# Helper function to run winget commands in user context when running as admin
+# WinGet is a per-user AppX package and doesn't work in elevated/admin contexts
+function Invoke-WinGetCommand {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string[]]$Arguments,
+        [Parameter(Mandatory=$false)]
+        [switch]$CaptureOutput
+    )
+    
+    $isRunningAsSystem = ($env:USERNAME -eq "SYSTEM")
+    
+    if ($isRunningAsSystem) {
+        # Running as SYSTEM/admin - winget won't work, need to run as logged-in user
+        $loggedInUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
+        if ($loggedInUser -and $loggedInUser -ne "SYSTEM") {
+            $username = $loggedInUser.Split('\')[-1]
+            Write-Log "Running winget as user $username (winget is user-scoped and doesn't work as admin)" -Level 'INFO' -Section "WinGet"
+            
+            # Try to find the user's profile path
+            $userProfile = (Get-CimInstance -ClassName Win32_UserProfile | Where-Object { $_.LocalPath -like "*$username" }).LocalPath
+            if ($userProfile) {
+                # Run winget from the user's context using their profile
+                $wingetPath = Join-Path $env:ProgramFiles "WindowsApps\Microsoft.DesktopAppInstaller_*\winget.exe"
+                $wingetExe = Get-Item $wingetPath -ErrorAction SilentlyContinue | Select-Object -First 1
+                
+                if ($wingetExe) {
+                    if ($CaptureOutput) {
+                        $tempOutput = [System.IO.Path]::GetTempFileName()
+                        $tempError = [System.IO.Path]::GetTempFileName()
+                        $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
+                        $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+                        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                        Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+                        Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+                        return @{
+                            ExitCode = $process.ExitCode
+                            Output = $output
+                            Error = $error
+                        }
+                    } else {
+                        $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+                        return @{
+                            ExitCode = $process.ExitCode
+                            Output = ""
+                            Error = ""
+                        }
+                    }
+                }
+            }
+            
+            # Fallback: warn that winget needs to run at user level
+            Write-Log "WARNING: Cannot run winget as admin (SYSTEM). Winget is user-scoped and must run in user context." -Level 'WARNING' -Section "WinGet"
+            Write-Log "Please run winget commands manually in a non-elevated user session." -Level 'WARNING' -Section "WinGet"
+            return @{
+                ExitCode = -1
+                Output = ""
+                Error = "Winget is not available in admin context"
+            }
+        }
+    }
+    
+    # Running in user context - can use winget directly
+    if ($CaptureOutput) {
+        $tempOutput = [System.IO.Path]::GetTempFileName()
+        $tempError = [System.IO.Path]::GetTempFileName()
+        $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
+        $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
+        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+        Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempError -Force -ErrorAction SilentlyContinue
+        return @{
+            ExitCode = $process.ExitCode
+            Output = $output
+            Error = $error
+        }
+    } else {
+        $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        return @{
+            ExitCode = $process.ExitCode
+            Output = ""
+            Error = ""
+        }
+    }
+}
+
 # Function to check if WinGet is available and working
 # Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+# Note: WinGet is a per-user AppX package and may not work in elevated/admin contexts
 function Test-WinGetInstalled {
     try {
         # Refresh PATH to ensure winget is available if recently installed
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
+        # Check if running as admin (SYSTEM) - winget won't work in that context
+        $isRunningAsSystem = ($env:USERNAME -eq "SYSTEM")
+        if ($isRunningAsSystem) {
+            Write-Log "WARNING: Running as SYSTEM/admin. WinGet is user-scoped and may not be available." -Level 'WARNING' -Section "WinGet Check"
+            Write-Log "WinGet operations should be performed in a non-elevated user session." -Level 'WARNING' -Section "WinGet Check"
+            # Still try to check, but expect it may fail
+        }
         
         # Use --info for better compatibility (recommended by Microsoft docs)
         $wingetInfo = winget --info 2>$null
@@ -595,6 +690,10 @@ function Test-WinGetInstalled {
         }
     } catch {
         # WinGet command not available
+        $isRunningAsSystem = ($env:USERNAME -eq "SYSTEM")
+        if ($isRunningAsSystem) {
+            Write-Log "WinGet not available in admin context (expected - WinGet is user-scoped)" -Level 'WARNING' -Section "WinGet Check"
+        }
     }
     
     return @{
@@ -722,7 +821,16 @@ function Ensure-WinGetConfigurationEnabled {
 
 # Check if WinGet is already installed and working
 # Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+# IMPORTANT: WinGet is a per-user AppX package and does NOT work in elevated/admin contexts
+# If running as admin (SYSTEM), WinGet operations will fail and should be done at user level
 Start-Section "WinGet Check"
+$isRunningAsSystem = ($env:USERNAME -eq "SYSTEM")
+if ($isRunningAsSystem) {
+    Write-Host "WARNING: Running as admin (SYSTEM). WinGet is user-scoped and may not be available." -ForegroundColor Yellow
+    Write-Host "WinGet operations should be performed in a non-elevated user session." -ForegroundColor Yellow
+    Write-Log "Running as SYSTEM/admin - WinGet is user-scoped and may not work" -Level 'WARNING' -Section "WinGet Check"
+}
+
 $wingetStatus = Test-WinGetInstalled
 $wingetInstalled = $wingetStatus.Installed
 $wingetWorking = $wingetStatus.Working
@@ -733,7 +841,14 @@ if ($wingetInstalled -and $wingetWorking) {
     End-Section "WinGet Check"
     $skipWinGetInstall = $true
 } else {
-    Write-Log "WinGet is not installed or not working. Proceeding with installation..." -Level 'INFO' -Section "WinGet Check"
+    if ($isRunningAsSystem) {
+        Write-Log "WinGet is not available in admin context (expected - WinGet is user-scoped)." -Level 'WARNING' -Section "WinGet Check"
+        Write-Log "WinGet installation and operations should be done in a non-elevated user session." -Level 'WARNING' -Section "WinGet Check"
+        Write-Host "NOTE: WinGet operations will be skipped when running as admin." -ForegroundColor Yellow
+        Write-Host "Please run WinGet commands manually in a non-elevated PowerShell session." -ForegroundColor Yellow
+    } else {
+        Write-Log "WinGet is not installed or not working. Proceeding with installation..." -Level 'INFO' -Section "WinGet Check"
+    }
     End-Section "WinGet Check"
     $skipWinGetInstall = $false
 }
