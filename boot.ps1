@@ -2982,14 +2982,16 @@ Write-Log "========================================" -Level 'INFO'
             Write-Log "4. Verify network connectivity if package downloads are failing" -Level 'WARNING' -Section "Dev Flows Installation"
         }
         
-        # Log summary of packages processed
-        # Use the captured output text instead of $script:configOutput (which was never set)
-        $packageCount = 0
-        if ($outputText) {
-            $packageCount = ($outputText -split "`n" | Where-Object { $_ -match 'Installing|Processing package|Successfully installed' }).Count
-        }
-        if ($packageCount -gt 0) {
-            Write-Log "Total packages processed: $packageCount" -Level 'INFO' -Section "Dev Flows Installation"
+        # Log summary of packages processed using actual tracking arrays
+        $devFlowsInstalled = ($script:InstalledItems | Where-Object { $_ -like "Dev Flows:*" }).Count
+        $devFlowsAlreadySet = ($script:AlreadySetItems | Where-Object { $_ -like "Dev Flows:*" }).Count
+        $devFlowsFailed = ($script:FailedItems | Where-Object { $_ -like "Dev Flows:*" }).Count
+        $processedCount = $devFlowsInstalled + $devFlowsAlreadySet + $devFlowsFailed
+        
+        Write-Log "Dev Flows summary: Installed=$devFlowsInstalled, AlreadyConfigured=$devFlowsAlreadySet, Failed=$devFlowsFailed" -Level 'INFO' -Section "Dev Flows Installation"
+        
+        if ($processedCount -gt 0) {
+            Write-Log "Total Dev Flows packages processed: $processedCount" -Level 'INFO' -Section "Dev Flows Installation"
         }
         
     } catch {
