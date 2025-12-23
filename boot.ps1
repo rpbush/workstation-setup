@@ -1,11 +1,52 @@
+# ============================================================================
+# PHASE-BASED WORKSTATION SETUP SCRIPT
+# ============================================================================
+# This script uses a phase-based execution model:
+# - Phase 1: Prerequisites (NFS, etc.) - may require reboot
+# - Phase 2: Main installation and configuration
+# ============================================================================
+
+# 1. PARAMETERS & PREAMBLE
+param (
+    [switch]$ResumeAfterReboot  # This flag tells the script we just rebooted
+)
+
 $mypath = $MyInvocation.MyCommand.Path
 Write-Output "Path of the script: $mypath"
 Write-Output "Args for script: $Args"
+Write-Output "ResumeAfterReboot: $ResumeAfterReboot"
 
-# Initialize logging system
-$scriptDir = Split-Path $mypath -Parent
-$logFileName = "workstation-setup-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-$logFilePath = Join-Path $scriptDir $logFileName
+# 2. IMMEDIATE ELEVATION CHECK
+# If not admin, restart self as admin immediately to preserve variables and logs
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Requesting Elevation..." -ForegroundColor Yellow
+    # Pass the current arguments and script path to the new process
+    $arguments = "-ExecutionPolicy Bypass -File `"$mypath`""
+    if ($ResumeAfterReboot) {
+        $arguments += " -ResumeAfterReboot"
+    }
+    $arguments += " $Args"
+    Start-Process PowerShell -Verb RunAs -ArgumentList $arguments
+    Exit
+}
+
+# 3. PERSISTENT LOGGING SETUP
+# We determine the log file name ONCE. If we are resuming, we append to the old log.
+$logPathFile = "$env:TEMP\SetupLogPath.txt"
+
+if ($ResumeAfterReboot -and (Test-Path $logPathFile)) {
+    # We are resuming, read the previous log file path
+    $logFilePath = Get-Content $logPathFile -Raw
+    Write-Output "Resuming setup. Appending to log: $logFilePath"
+} else {
+    # New run, create new log
+    $scriptDir = Split-Path $mypath -Parent
+    $logFileName = "workstation-setup-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $logFilePath = Join-Path $scriptDir $logFileName
+    # Save log path for resume after reboot
+    $logFilePath | Out-File $logPathFile -Force
+}
+
 $scriptStartTime = Get-Date
 $sectionStartTimes = @{}
 
@@ -776,8 +817,12 @@ if (-not $configEnabled) {
 End-Section "WinGet Configuration Enable"
 
 # ---------------
+# NOTE: NFS Client installation is now handled in Phase 1 (before reboot)
+# This section is skipped as NFS is handled earlier in the script
+# ---------------
 # Installing NFS Client feature (moved to start as it may require reboot)
-Start-Section "NFS Client Installation"
+# REMOVED - Now handled in Phase 1
+# Start-Section "NFS Client Installation"
 $nfsNeedsReboot = $false
 try {
     # Try different feature names depending on Windows version
@@ -1076,17 +1121,17 @@ try {
 End-Section "Windows HWID Activation"
 # ---------------
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
 # Try to use local DSC files first, then fall back to GitHub
 $scriptDir = Split-Path $mypath -Parent
 $dscNonAdmin = "rpbush.nonAdmin.dsc.yml";
 $dscAdmin = "rpbush.dev.dsc.yml";
+$dscAdminNoDrive = "rpbush.dev.nodrive.dsc.yml";  # DSC file without Dev Drive resource
 $dscOffice = "rpbush.office.dsc.yml";
 
 # Check if DSC files exist locally
 $dscNonAdminLocal = Join-Path $scriptDir $dscNonAdmin
 $dscAdminLocal = Join-Path $scriptDir $dscAdmin
+$dscAdminNoDriveLocal = Join-Path $scriptDir $dscAdminNoDrive
 $dscOfficeLocal = Join-Path $scriptDir $dscOffice
 
 # GitHub repository for DSC files (use workstation-setup repo which contains the files)
@@ -1095,66 +1140,166 @@ $dscUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/"
 $dscOfficeUri = $dscUri + $dscOffice;
 $dscNonAdminUri = $dscUri + $dscNonAdmin 
 $dscAdminUri = $dscUri + $dscAdmin
+$dscAdminNoDriveUri = $dscUri + $dscAdminNoDrive
 
-# amazing, we can now run WinGet get fun stuff
-if (!$isAdmin) {
-   # Shoulder tap terminal to it gets registered moving foward
-   Start-Process shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App
+# ============================================================================
+# PHASE 1: PREREQUISITES & REBOOT HANDLING
+# ============================================================================
+# This phase handles features that require a reboot (like NFS Client)
+# If a reboot is needed, the script will automatically restart and resume
+# ============================================================================
 
-   Start-Section "NonAdmin DSC Installation"
-   $nonAdminDscDownloaded = $false
-   
-   # Check if file exists locally first
-   if (Test-Path $dscNonAdminLocal) {
-       Write-Log "Using local NonAdmin DSC file: $dscNonAdminLocal" -Level 'INFO' -Section "NonAdmin DSC Installation"
-       Copy-Item $dscNonAdminLocal $dscNonAdmin -Force
-       $nonAdminDscDownloaded = $true
-   } else {
-       try {
-           Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
-           $downloadStart = Get-Date
-           Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
-           $downloadDuration = (Get-Date) - $downloadStart
-           Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
-           $nonAdminDscDownloaded = $true
-       } catch {
-           $script:ErrorCount++
-           Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
-           Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
-       }
-   }
-   
-   if ($nonAdminDscDownloaded) {
-       try {
-           Write-Log "Running winget configuration for NonAdmin DSC" -Level 'INFO' -Section "NonAdmin DSC Installation"
-           $configStart = Get-Date
-           $configOutput = winget configuration -f $dscNonAdmin --accept-configuration-agreements 2>&1
-           $configDuration = (Get-Date) - $configStart
-           if ($LASTEXITCODE -eq 0) {
-               Write-Log "NonAdmin DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
-           } else {
-               $script:ErrorCount++
-               Write-Log "NonAdmin DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "NonAdmin DSC Installation"
-               Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "NonAdmin DSC Installation"
-           }
-       } catch {
-           $script:ErrorCount++
-           Write-Log "Exception during NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
-       }
-   }
-   End-Section "NonAdmin DSC Installation"
-   
-   # clean up, Clean up, everyone wants to clean up
-   if (Test-Path $dscNonAdmin) {
-       Remove-Item $dscNonAdmin -verbose
-   }
+if (-not $ResumeAfterReboot) {
+    Write-Log "========================================" -Level 'INFO'
+    Write-Log "PHASE 1: Prerequisites" -Level 'SECTION_START'
+    Write-Log "========================================" -Level 'INFO'
+    
+    # Run non-admin DSC first (if needed)
+    # Shoulder tap terminal to it gets registered moving forward
+    try {
+        Start-Process shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App -ErrorAction SilentlyContinue
+    } catch {
+        # Terminal may not be installed yet, continue
+    }
 
-   # restarting for Admin now
-	Start-Process PowerShell -wait -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$pwd'; & '$mypath' $Args;`""
-	exit
+    Start-Section "NonAdmin DSC Installation"
+    $nonAdminDscDownloaded = $false
+    
+    # Check if file exists locally first
+    if (Test-Path $dscNonAdminLocal) {
+        Write-Log "Using local NonAdmin DSC file: $dscNonAdminLocal" -Level 'INFO' -Section "NonAdmin DSC Installation"
+        Copy-Item $dscNonAdminLocal $dscNonAdmin -Force
+        $nonAdminDscDownloaded = $true
+    } else {
+        try {
+            Write-Log "Downloading NonAdmin DSC configuration from: $dscNonAdminUri" -Level 'INFO' -Section "NonAdmin DSC Installation"
+            $downloadStart = Get-Date
+            Invoke-WebRequest -Uri $dscNonAdminUri -OutFile $dscNonAdmin -ErrorAction Stop
+            $downloadDuration = (Get-Date) - $downloadStart
+            Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+            $nonAdminDscDownloaded = $true
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
+            Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+        }
+    }
+    
+    if ($nonAdminDscDownloaded) {
+        try {
+            Write-Log "Running winget configuration for NonAdmin DSC" -Level 'INFO' -Section "NonAdmin DSC Installation"
+            $configStart = Get-Date
+            $configOutput = winget configuration -f $dscNonAdmin --accept-configuration-agreements 2>&1
+            $configDuration = (Get-Date) - $configStart
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "NonAdmin DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
+            } else {
+                $script:ErrorCount++
+                Write-Log "NonAdmin DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "NonAdmin DSC Installation"
+                Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "NonAdmin DSC Installation"
+            }
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Exception during NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
+        }
+    }
+    End-Section "NonAdmin DSC Installation"
+    
+    # Clean up
+    if (Test-Path $dscNonAdmin) {
+        Remove-Item $dscNonAdmin -Force -ErrorAction SilentlyContinue
+    }
+    
+    # Check NFS Client installation - this requires a reboot
+    # Note: The NFS section below (line 820+) will be skipped if we handle it here
+    # We need to check if NFS needs installation and handle reboot
+    $nfsNeedsReboot = $false
+    $nfsInstalled = $false
+    
+    # Try different feature names depending on Windows version
+    $nfsFeatureNames = @("ClientForNFS-Infrastructure", "ServicesForNFS-ClientOnly")
+    
+    foreach ($featureName in $nfsFeatureNames) {
+        if (Test-WindowsFeatureInstalled -FeatureName $featureName) {
+            Write-Log "NFS Client feature ($featureName) is already installed" -Level 'INFO' -Section "NFS Client Installation"
+            $script:AlreadySetItems += "NFS Client"
+            $nfsInstalled = $true
+            break
+        } else {
+            $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+            if ($nfsFeature) {
+                Write-Log "Installing NFS Client feature ($featureName) - this requires a reboot..." -Level 'INFO' -Section "NFS Client Installation"
+                Write-Host "Installing NFS Client feature (this requires a reboot)..." -ForegroundColor Yellow
+                
+                try {
+                    Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
+                    Write-Log "NFS Client feature ($featureName) installation initiated" -Level 'SUCCESS' -Section "NFS Client Installation"
+                    $nfsInstalled = $true
+                    $nfsNeedsReboot = $true
+                    break
+                } catch {
+                    if ($_.Exception.Message -match "Class not registered" -or $_.Exception -is [System.Runtime.InteropServices.COMException]) {
+                        try {
+                            $dismResult = dism.exe /Online /Enable-Feature /FeatureName:$featureName /All /NoRestart 2>&1 | Out-String
+                            if ($LASTEXITCODE -eq 0 -or $dismResult -match "completed successfully") {
+                                Write-Log "NFS Client feature ($featureName) installed successfully using DISM" -Level 'SUCCESS' -Section "NFS Client Installation"
+                                $nfsInstalled = $true
+                                $nfsNeedsReboot = $true
+                                break
+                            }
+                        } catch {
+                            # Continue to next feature name
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    # If NFS was just installed, we need to reboot
+    if ($nfsNeedsReboot) {
+        Write-Host ""
+        Write-Host "NFS Client feature requires a system restart to function properly." -ForegroundColor Yellow
+        Write-Host "The script will automatically restart and resume after reboot." -ForegroundColor Yellow
+        Write-Host ""
+        
+        Write-Log "NFS installed. Preparing for automatic reboot and resume..." -Level 'INFO'
+        
+        # Create a RunOnce key to auto-start this script on next login
+        # We add the -ResumeAfterReboot flag here
+        $command = "PowerShell.exe -ExecutionPolicy Bypass -File `"$mypath`" -ResumeAfterReboot"
+        Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "ContinueSetup" -Value $command -Force
+        
+        Write-Log "RunOnce key created. Rebooting in 10 seconds..." -Level 'INFO'
+        Write-Host "Rebooting in 10 seconds... Press Ctrl+C to cancel" -ForegroundColor Yellow
+        Start-Sleep -Seconds 10
+        Restart-Computer -Force
+        Exit  # Stop script here, let Windows restart
+    }
+    
+    Write-Log "========================================" -Level 'INFO'
+    Write-Log "PHASE 1: Prerequisites Complete" -Level 'SECTION_END'
+    Write-Log "========================================" -Level 'INFO'
+} else {
+    Write-Log "========================================" -Level 'INFO'
+    Write-Log "Resuming after reboot..." -Level 'SECTION_START'
+    Write-Log "========================================" -Level 'INFO'
+    
+    # Remove the RunOnce key since we've resumed
+    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "ContinueSetup" -ErrorAction SilentlyContinue
 }
-else {
-   # admin section now
+
+# ============================================================================
+# PHASE 2: MAIN INSTALLATION & CONFIGURATION
+# ============================================================================
+# This phase runs after prerequisites are met (and after reboot if needed)
+# ============================================================================
+
+Write-Log "========================================" -Level 'INFO'
+Write-Log "PHASE 2: Main Installation & Configuration" -Level 'SECTION_START'
+Write-Log "========================================" -Level 'INFO'
+
+# Admin section now
    # ---------------
     # ---------------
     # Configure File Explorer to show hidden files and folders
@@ -1458,8 +1603,168 @@ else {
     }
     Write-Host "Done: Setting system tray to show all icons"
     # ---------------
+    
+    # ============================================================================
+    # NETWORK STABILIZATION FUNCTIONS
+    # ============================================================================
+    # These functions ensure network and DNS are ready before attempting drive mapping
+    # This fixes "System error 67" caused by DNS resolution delays
+    
+    function Wait-ForNetwork {
+        param(
+            [Parameter(Mandatory=$false)]
+            [string[]]$Servers = @("FS-1"),
+            [Parameter(Mandatory=$false)]
+            [int]$MaxRetries = 30,
+            [Parameter(Mandatory=$false)]
+            [int]$RetryDelaySeconds = 2
+        )
+        
+        Write-Host "Waiting for network stability..." -ForegroundColor Cyan
+        Write-Log "Waiting for network stability (checking servers: $($Servers -join ', '))..." -Level 'INFO' -Section "Network Stabilization"
+        
+        $allReachable = $false
+        $attempts = 0
+        
+        while ($attempts -lt $MaxRetries -and -not $allReachable) {
+            $attempts++
+            $allReachable = $true
+            
+            foreach ($server in $Servers) {
+                Write-Log "Checking connectivity to $server (attempt $attempts of $MaxRetries)..." -Level 'INFO' -Section "Network Stabilization"
+                
+                # Try ping first (ICMP)
+                $pingResult = Test-Connection -ComputerName $server -Count 1 -Quiet -ErrorAction SilentlyContinue
+                
+                if (-not $pingResult) {
+                    # If ping fails, try DNS resolution as fallback
+                    try {
+                        $dnsResult = [System.Net.Dns]::GetHostEntry($server)
+                        if ($dnsResult -and $dnsResult.AddressList.Count -gt 0) {
+                            Write-Log "DNS resolution successful for $server (IP: $($dnsResult.AddressList[0]))" -Level 'INFO' -Section "Network Stabilization"
+                            $pingResult = $true
+                        }
+                    } catch {
+                        # DNS resolution also failed
+                        Write-Log "DNS resolution failed for $server: $_" -Level 'WARNING' -Section "Network Stabilization"
+                    }
+                }
+                
+                if (-not $pingResult) {
+                    $allReachable = $false
+                    Write-Host "  → Waiting for $server to be reachable..." -ForegroundColor Yellow
+                    break
+                } else {
+                    Write-Log "$server is reachable" -Level 'SUCCESS' -Section "Network Stabilization"
+                }
+            }
+            
+            if (-not $allReachable) {
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+        }
+        
+        if ($allReachable) {
+            Write-Host "Network is stable and all servers are reachable." -ForegroundColor Green
+            Write-Log "Network stabilization complete - all servers are reachable" -Level 'SUCCESS' -Section "Network Stabilization"
+            return $true
+        } else {
+            Write-Warning "Network might not be fully ready after $MaxRetries attempts. Continuing anyway..."
+            Write-Log "Network stabilization incomplete after $MaxRetries attempts - some servers may not be reachable" -Level 'WARNING' -Section "Network Stabilization"
+            return $false
+        }
+    }
+    
+    function Ensure-NfsServiceReady {
+        Write-Log "Ensuring NFS Client service is ready..." -Level 'INFO' -Section "Network Drive Mapping"
+        
+        # Try multiple possible service names
+        $nfsServiceNames = @("NfsClnt", "NfsRdr", "NfsService")
+        $nfsService = $null
+        $nfsServiceName = $null
+        
+        foreach ($serviceName in $nfsServiceNames) {
+            try {
+                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($service) {
+                    $nfsService = $service
+                    $nfsServiceName = $serviceName
+                    break
+                }
+            } catch {
+                # Service not found, continue
+            }
+        }
+        
+        if ($nfsService) {
+            if ($nfsService.Status -ne "Running") {
+                Write-Log "NFS Client service ($nfsServiceName) is not running. Starting it..." -Level 'WARNING' -Section "Network Drive Mapping"
+                
+                # Try nfsadmin first (more reliable for NFS)
+                try {
+                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "NFS Client service started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 3
+                        return $true
+                    }
+                } catch {
+                    # nfsadmin not available, try Start-Service
+                }
+                
+                # Fallback to Start-Service
+                try {
+                    Start-Service -Name $nfsServiceName -ErrorAction Stop
+                    Write-Log "NFS Client service ($nfsServiceName) started successfully" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                    Start-Sleep -Seconds 2
+                    return $true
+                } catch {
+                    Write-Log "Failed to start NFS Client service ($nfsServiceName): $_" -Level 'WARNING' -Section "Network Drive Mapping"
+                    return $false
+                }
+            } else {
+                Write-Log "NFS Client service ($nfsServiceName) is running" -Level 'INFO' -Section "Network Drive Mapping"
+                # Give it a moment to ensure the network provider is registered
+                Start-Sleep -Seconds 1
+                return $true
+            }
+        } else {
+            # Try nfsadmin as fallback
+            try {
+                $nfsAdminCheck = nfsadmin client 2>&1 | Out-String
+                if ($nfsAdminCheck -notmatch "not recognized" -and $nfsAdminCheck -notmatch "not found") {
+                    Write-Log "nfsadmin available, attempting to start NFS client..." -Level 'INFO' -Section "Network Drive Mapping"
+                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "NFS Client started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
+                        Start-Sleep -Seconds 3
+                        return $true
+                    }
+                }
+            } catch {
+                # nfsadmin not available
+            }
+            
+            Write-Log "NFS Client service not found. NFS mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
+            return $false
+        }
+    }
+    
+    # ============================================================================
     # Mapping network drives
+    # ============================================================================
     Start-Section "Network Drive Mapping"
+    
+    # CRITICAL: Wait for network stability before attempting any drive mapping
+    # This fixes "System error 67" caused by DNS resolution delays
+    Write-Host "`n[STEP] Network Stabilization - Ensuring network is ready..." -ForegroundColor Cyan
+    $networkReady = Wait-ForNetwork -Servers @("FS-1") -MaxRetries 30 -RetryDelaySeconds 2
+    
+    if (-not $networkReady) {
+        Write-Host "  ⚠ Network may not be fully ready, but continuing with drive mapping..." -ForegroundColor Yellow
+    } else {
+        Write-Host "  ✓ Network is stable and ready" -ForegroundColor Green
+    }
     try {
         # NFS Client feature installation moved to start of script (may require reboot)
         # Windows Sandbox feature installation moved to Windows Features section
@@ -1476,73 +1781,16 @@ else {
         $nDrive = "N:"
         $nPath = "NFS:/media"
         Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Host "  → Mapping N: to NFS:/media..." -ForegroundColor Gray
         
-        # Check if NFS Client service is running
-        # Try multiple possible service names (varies by Windows version and NFS feature installed)
-        $nfsServiceNames = @("NfsClnt", "NfsRdr", "NfsService")
-        $nfsService = $null
-        $nfsServiceName = $null
-        
-        foreach ($serviceName in $nfsServiceNames) {
-            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            if ($service) {
-                $nfsService = $service
-                $nfsServiceName = $serviceName
-                break
-            }
-        }
-        
-        if ($nfsService) {
-            if ($nfsService.Status -ne "Running") {
-                Write-Log "NFS Client service ($nfsServiceName) is not running. Attempting to start it..." -Level 'WARNING' -Section "Network Drive Mapping"
-                $serviceStarted = $false
-                
-                # Try using nfsadmin command first (more reliable for NFS)
-                try {
-                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Log "NFS Client service started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        $serviceStarted = $true
-                        Start-Sleep -Seconds 3
-                    }
-                } catch {
-                    # nfsadmin not available or failed, try Start-Service
-                }
-                
-                # If nfsadmin didn't work, try Start-Service
-                if (-not $serviceStarted) {
-                    try {
-                        Start-Service -Name $nfsServiceName -ErrorAction Stop
-                        Write-Log "NFS Client service ($nfsServiceName) started successfully" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        Start-Sleep -Seconds 2
-                    } catch {
-                        $script:WarningCount++
-                        Write-Log "Failed to start NFS Client service ($nfsServiceName): $_" -Level 'WARNING' -Section "Network Drive Mapping"
-                        Write-Log "You may need to start the service manually or restart the computer if NFS was just installed" -Level 'WARNING' -Section "Network Drive Mapping"
-                    }
-                }
-            } else {
-                Write-Log "NFS Client service ($nfsServiceName) is running" -Level 'INFO' -Section "Network Drive Mapping"
-            }
-        } else {
+        # CRITICAL: Ensure NFS service is running and network provider is ready
+        # This fixes "System error 67" for NFS caused by provider not being registered
+        $nfsReady = Ensure-NfsServiceReady
+        if (-not $nfsReady) {
             $script:WarningCount++
-            Write-Log "NFS Client service not found (checked: $($nfsServiceNames -join ', ')). NFS mapping may fail." -Level 'WARNING' -Section "Network Drive Mapping"
-            Write-Log "This may indicate that the NFS Client feature is not installed or requires a reboot after installation" -Level 'WARNING' -Section "Network Drive Mapping"
-            
-            # Try to use nfsadmin to check if NFS is available at all
-            try {
-                $nfsAdminCheck = nfsadmin client 2>&1 | Out-String
-                if ($nfsAdminCheck -notmatch "not recognized" -and $nfsAdminCheck -notmatch "not found") {
-                    Write-Log "nfsadmin command is available. Attempting to start NFS client using nfsadmin..." -Level 'INFO' -Section "Network Drive Mapping"
-                    $nfsAdminResult = nfsadmin client start 2>&1 | Out-String
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Log "NFS Client started successfully using nfsadmin" -Level 'SUCCESS' -Section "Network Drive Mapping"
-                        Start-Sleep -Seconds 3
-                    }
-                }
-            } catch {
-                # nfsadmin not available
-            }
+            Write-Host "  ⚠ NFS service may not be ready, but continuing with mapping attempt..." -ForegroundColor Yellow
+        } else {
+            Write-Host "  ✓ NFS service is ready" -ForegroundColor Green
         }
         
         # Remove existing mapping if it exists
@@ -1642,9 +1890,12 @@ else {
         
         # Map S: drive to \\FS-1\Storage (Windows Network)
         Write-Log "Attempting to map $sDrive to $sPath" -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Host "  → Mapping S: to \\FS-1\Storage..." -ForegroundColor Gray
         
-        # Test network connectivity to the server first (with timeout to prevent hanging)
-        Write-Log "Testing connectivity to server: $serverName" -Level 'INFO' -Section "Network Drive Mapping"
+        # CRITICAL: Verify server is still reachable (network may have changed)
+        # This fixes "System error 67" for SMB caused by DNS resolution delays
+        Write-Log "Verifying connectivity to server: $serverName" -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Host "  → Verifying connectivity to FS-1..." -ForegroundColor Gray
         try {
             # Use a job with timeout to prevent hanging
             $pingJob = Start-Job -ScriptBlock { param($server) Test-Connection -ComputerName $server -Count 1 -Quiet -ErrorAction SilentlyContinue } -ArgumentList $serverName
@@ -2172,247 +2423,84 @@ else {
     # Ending office workload
     # ---------------
 
-    # Staring dev workload
+    # Starting dev workload
     Start-Section "Dev Flows Installation"
     Write-Host "`n[STEP] Dev Flows Installation - Installing development tools and applications..." -ForegroundColor Cyan
     
-    # Check if a second physical drive already exists (skip dev drive creation if it does)
-    Write-Host "  → Checking physical drives..." -ForegroundColor Gray
+    # Determine which DSC file to use based on drive configuration
+    # Instead of regex editing, we use separate files: rpbush.dev.dsc.yml (with Dev Drive) or rpbush.dev.nodrive.dsc.yml (without)
+    Write-Host "  → Checking physical drives and space..." -ForegroundColor Gray
     $physicalDrives = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' } | Sort-Object DeviceID
     $secondDriveExists = $physicalDrives.Count -gt 1
     
+    # Determine if we need Dev Drive or not
+    $useDevDrive = $false
     if ($secondDriveExists) {
-        Write-Host "  ✓ Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation." -ForegroundColor Green
-        # Check if file exists locally first
-        if (Test-Path $dscAdminLocal) {
-            Write-Log "Using local Dev flows DSC file: $dscAdminLocal" -Level 'INFO' -Section "Dev Flows Installation"
-            Copy-Item $dscAdminLocal $dscAdmin -Force
-        } else {
-            try {
-                Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
-                $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
-                $downloadDuration = (Get-Date) - $downloadStart
-                Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-        } catch {
-                $script:ErrorCount++
-                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-                End-Section "Dev Flows Installation"
-            return
-            }
-        }
-        
-        # Remove Dev Drive resource from DSC file if it exists
-        Write-Log "Processing Dev flows DSC file to remove Dev Drive resource (if needed)..." -Level 'INFO' -Section "Dev Flows Installation"
-        try {
-            $dscLines = Get-Content $dscAdmin -ErrorAction Stop
-            Write-Log "DSC file loaded successfully ($($dscLines.Count) lines)" -Level 'INFO' -Section "Dev Flows Installation"
-        } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to read DSC file: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-            End-Section "Dev Flows Installation"
-            return
-        }
-        
-        $newDscContent = @()
-        $inDevDriveResource = $false
-        $devDriveResourceStart = -1
-        
-        Write-Log "Processing $($dscLines.Count) lines to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
-        
-        $devDriveFound = $false
-        $loopCount = 0
-        $maxLoopIterations = $dscLines.Count * 2  # Safety limit to prevent infinite loops
-        
-        for ($i = 0; $i -lt $dscLines.Count; $i++) {
-            $loopCount++
-            if ($loopCount -gt $maxLoopIterations) {
-                Write-Log "ERROR: Processing loop exceeded safety limit. Breaking to prevent infinite loop." -Level 'ERROR' -Section "Dev Flows Installation"
-                break
-            }
-            
-            $line = $dscLines[$i]
-            
-            # Progress indicator every 50 lines
-            if ($i -gt 0 -and $i % 50 -eq 0) {
-                Write-Log "Processing line $i of $($dscLines.Count)..." -Level 'INFO' -Section "Dev Flows Installation"
-            }
-            
-            # Detect start of Dev Drive resource block
-            if (-not $inDevDriveResource -and $line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
-                # Check if next line or nearby has "id: DevDrive1"
-                $checkAhead = [Math]::Min(5, $dscLines.Count - $i - 1)
-                for ($k = 1; $k -le $checkAhead; $k++) {
-                    if ($dscLines[$i + $k] -match '^\s+id:\s+DevDrive1') {
-                        Write-Log "Found Dev Drive resource starting at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
-                        $devDriveFound = $true
-                        $inDevDriveResource = $true
-                        $devDriveResourceStart = $i
-                        # Skip this resource block - don't add this line
-                        continue
-                    }
-                }
-            }
-            
-            # If we're in the Dev Drive resource, skip until we find the next resource or end of block
-            if ($inDevDriveResource) {
-                # Check if we've reached the next resource (starts with "    - resource:")
-                if ($line -match '^\s+-\s+resource:' -and $i -gt $devDriveResourceStart) {
-                    # We've reached the next resource, stop skipping
-                    $inDevDriveResource = $false
-                    Write-Log "Reached next resource at line $($i+1), ending Dev Drive resource removal" -Level 'INFO' -Section "Dev Flows Installation"
-                        $newDscContent += $line
-                    }
-                # Otherwise, skip this line (don't add it to new content)
-                continue
-            }
-            
-            # Add line if we're not skipping
-            $newDscContent += $line
-        }
-        
-        Write-Log "DSC file processing complete. Original: $($dscLines.Count) lines, New: $($newDscContent.Count) lines" -Level 'INFO' -Section "Dev Flows Installation"
-        
-        if ($devDriveFound -and $newDscContent.Count -lt $dscLines.Count) {
-            Write-Log "Removing Dev Drive resource from DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
-            try {
-                Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n") -ErrorAction Stop
-                Write-Log "Dev Drive resource removed from configuration (removed $($dscLines.Count - $newDscContent.Count) lines)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-            } catch {
-                $script:ErrorCount++
-                Write-Log "Failed to write modified DSC file" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-            }
-        } else {
-            Write-Log "Dev Drive resource not found in DSC file (may have already been removed)" -Level 'INFO' -Section "Dev Flows Installation"
-        }
+        Write-Host "  ✓ Second physical drive detected ($($physicalDrives.Count) drives found). Using full DSC with Dev Drive." -ForegroundColor Green
+        $useDevDrive = $true
     } else {
-        Write-Log "No second physical drive detected ($($physicalDrives.Count) drive(s) found). Checking if Dev Drive can be created from C: drive." -Level 'INFO' -Section "Dev Flows Installation"
-        
-        # Check if file exists locally first
-        if (Test-Path $dscAdminLocal) {
-            Write-Log "Using local Dev flows DSC file: $dscAdminLocal" -Level 'INFO' -Section "Dev Flows Installation"
-            Copy-Item $dscAdminLocal $dscAdmin -Force
-        } else {
-            try {
-                Write-Log "Downloading Dev flows DSC configuration from: $dscAdminUri" -Level 'INFO' -Section "Dev Flows Installation"
-                $downloadStart = Get-Date
-            Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscAdmin -ErrorAction Stop
-                $downloadDuration = (Get-Date) - $downloadStart
-                Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-        } catch {
-                $script:ErrorCount++
-                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-                End-Section "Dev Flows Installation"
-            return
-            }
-        }
-        
-        # Check available space on C: drive for Dev Drive creation (requires 75GB)
+        # Check if C: has enough space (75GB required)
         try {
             $cDrive = Get-PSDrive -Name C -ErrorAction Stop
             $freeSpaceGB = [math]::Round($cDrive.Free / 1GB, 2)
             $requiredSpaceGB = 75
             Write-Log "C: drive free space: $freeSpaceGB GB (required: $requiredSpaceGB GB for Dev Drive)" -Level 'INFO' -Section "Dev Flows Installation"
             
-            if ($freeSpaceGB -lt $requiredSpaceGB) {
-                Write-Log "Insufficient space on C: drive for Dev Drive creation. Removing Dev Drive resource from DSC configuration." -Level 'WARNING' -Section "Dev Flows Installation"
-                $removeDevDrive = $true
+            if ($freeSpaceGB -ge $requiredSpaceGB) {
+                Write-Host "  ✓ Sufficient space on C: drive ($freeSpaceGB GB). Using full DSC with Dev Drive." -ForegroundColor Green
+                $useDevDrive = $true
             } else {
-                Write-Log "Sufficient space available on C: drive. Dev Drive will be created." -Level 'INFO' -Section "Dev Flows Installation"
-                $removeDevDrive = $false
+                Write-Host "  → Insufficient space on C: drive ($freeSpaceGB GB). Using DSC without Dev Drive." -ForegroundColor Yellow
+                $useDevDrive = $false
             }
         } catch {
-            Write-Log "Could not check C: drive free space. Removing Dev Drive resource to avoid potential failures." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-            $removeDevDrive = $true
-        }
-        
-        # Remove Dev Drive resource from DSC file if needed
-        if ($removeDevDrive) {
-            Write-Log "Processing Dev flows DSC file to remove Dev Drive resource..." -Level 'INFO' -Section "Dev Flows Installation"
-            try {
-                $dscLines = Get-Content $dscAdmin -ErrorAction Stop
-                Write-Log "DSC file loaded successfully ($($dscLines.Count) lines)" -Level 'INFO' -Section "Dev Flows Installation"
-            } catch {
-                $script:ErrorCount++
-                Write-Log "Failed to read DSC file: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                End-Section "Dev Flows Installation"
-                return
-            }
-            
-            $newDscContent = @()
-            $inDevDriveResource = $false
-            $devDriveResourceStart = -1
-            $devDriveFound = $false
-            $loopCount = 0
-            $maxLoopIterations = $dscLines.Count * 2
-            
-            for ($i = 0; $i -lt $dscLines.Count; $i++) {
-                $loopCount++
-                if ($loopCount -gt $maxLoopIterations) {
-                    Write-Log "ERROR: Processing loop exceeded safety limit. Breaking to prevent infinite loop." -Level 'ERROR' -Section "Dev Flows Installation"
-                    break
-                }
-                
-                $line = $dscLines[$i]
-                
-                # Detect start of Dev Drive resource block
-                if (-not $inDevDriveResource -and $line -match '^\s+-\s+resource:\s+Disk' -and $i + 1 -lt $dscLines.Count) {
-                    # Check if next line or nearby has "id: DevDrive1"
-                    $checkAhead = [Math]::Min(5, $dscLines.Count - $i - 1)
-                    for ($k = 1; $k -le $checkAhead; $k++) {
-                        if ($dscLines[$i + $k] -match '^\s+id:\s+DevDrive1') {
-                            Write-Log "Found Dev Drive resource starting at line $($i+1), removing it..." -Level 'INFO' -Section "Dev Flows Installation"
-                            $devDriveFound = $true
-                            $inDevDriveResource = $true
-                            $devDriveResourceStart = $i
-                            # Skip this resource block - don't add this line
-                            continue
-                        }
-                    }
-                }
-                
-                # If we're in the Dev Drive resource, skip until we find the next resource or end of block
-                if ($inDevDriveResource) {
-                    # Check if we've reached the next resource (starts with "    - resource:")
-                    if ($line -match '^\s+-\s+resource:' -and $i -gt $devDriveResourceStart) {
-                        # We've reached the next resource, stop skipping
-                        $inDevDriveResource = $false
-                        Write-Log "Reached next resource at line $($i+1), ending Dev Drive resource removal" -Level 'INFO' -Section "Dev Flows Installation"
-                        $newDscContent += $line
-                    }
-                    # Otherwise, skip this line (don't add it to new content)
-                    continue
-                }
-                
-                # Add line if we're not skipping
-                $newDscContent += $line
-            }
-            
-            Write-Log "DSC file processing complete. Original: $($dscLines.Count) lines, New: $($newDscContent.Count) lines" -Level 'INFO' -Section "Dev Flows Installation"
-            
-            if ($devDriveFound -and $newDscContent.Count -lt $dscLines.Count) {
-                Write-Log "Removing Dev Drive resource from DSC configuration..." -Level 'INFO' -Section "Dev Flows Installation"
-                try {
-                    Set-Content -Path $dscAdmin -Value ($newDscContent -join "`r`n") -ErrorAction Stop
-                    Write-Log "Dev Drive resource removed from configuration (removed $($dscLines.Count - $newDscContent.Count) lines)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                } catch {
-                    $script:ErrorCount++
-                    Write-Log "Failed to write modified DSC file" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                }
-            } else {
-                Write-Log "Dev Drive resource not found in DSC file (may have already been removed)" -Level 'INFO' -Section "Dev Flows Installation"
-            }
+            Write-Log "Could not check C: drive free space. Using DSC without Dev Drive to avoid potential failures." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+            Write-Host "  → Could not check drive space. Using DSC without Dev Drive." -ForegroundColor Yellow
+            $useDevDrive = $false
         }
     }
     
+    # Select the appropriate DSC file
+    if ($useDevDrive) {
+        $dscFileToUse = $dscAdmin
+        $dscFileToUseLocal = $dscAdminLocal
+        $dscFileToUseUri = $dscAdminUri
+        Write-Log "Using Dev Flows DSC file WITH Dev Drive: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
+    } else {
+        $dscFileToUse = $dscAdminNoDrive
+        $dscFileToUseLocal = $dscAdminNoDriveLocal
+        $dscFileToUseUri = $dscAdminNoDriveUri
+        Write-Log "Using Dev Flows DSC file WITHOUT Dev Drive: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
+    }
+    
+    # Download or use local file
+    if (Test-Path $dscFileToUseLocal) {
+        Write-Log "Using local Dev flows DSC file: $dscFileToUseLocal" -Level 'INFO' -Section "Dev Flows Installation"
+        Copy-Item $dscFileToUseLocal $dscFileToUse -Force
+    } else {
+        try {
+            Write-Log "Downloading Dev flows DSC configuration from: $dscFileToUseUri" -Level 'INFO' -Section "Dev Flows Installation"
+            $downloadStart = Get-Date
+            Invoke-WebRequest -Uri $dscFileToUseUri -OutFile $dscFileToUse -ErrorAction Stop
+            $downloadDuration = (Get-Date) - $downloadStart
+            Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+            End-Section "Dev Flows Installation"
+            return
+        }
+    }
+    
+    # OLD REGEX EDITING CODE REMOVED - Now using separate files instead
+    # This eliminates the fragile regex parsing that was causing DSC failures
     # Use --accept-configuration-agreements for winget configure (not --accept-package-agreements)
     Write-Log "Preparing to run winget configuration for Dev flows DSC..." -Level 'INFO' -Section "Dev Flows Installation"
-    Write-Log "DSC file path: $dscAdmin" -Level 'INFO' -Section "Dev Flows Installation"
-    if (-not (Test-Path $dscAdmin)) {
+    Write-Log "DSC file path: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
+    if (-not (Test-Path $dscFileToUse)) {
         $script:ErrorCount++
-        Write-Log "DSC file does not exist: $dscAdmin" -Level 'ERROR' -Section "Dev Flows Installation"
+        Write-Log "DSC file does not exist: $dscFileToUse" -Level 'ERROR' -Section "Dev Flows Installation"
         End-Section "Dev Flows Installation"
         return
     }
@@ -2457,32 +2545,32 @@ else {
         $script:packageStartTime = $null
         
         # Ensure we have the full path to the DSC file
-        $dscAdminFullPath = if ([System.IO.Path]::IsPathRooted($dscAdmin)) {
-            $dscAdmin
+        $dscFileToUseFullPath = if ([System.IO.Path]::IsPathRooted($dscFileToUse)) {
+            $dscFileToUse
         } else {
-            $resolvedPath = Resolve-Path -Path $dscAdmin -ErrorAction SilentlyContinue
+            $resolvedPath = Resolve-Path -Path $dscFileToUse -ErrorAction SilentlyContinue
             if ($resolvedPath) {
                 $resolvedPath.Path
             } else {
-                Join-Path (Get-Location) $dscAdmin
+                Join-Path (Get-Location) $dscFileToUse
             }
         }
         
         # Normalize the path (resolve any .. or . components)
-        $dscAdminFullPath = [System.IO.Path]::GetFullPath($dscAdminFullPath)
+        $dscFileToUseFullPath = [System.IO.Path]::GetFullPath($dscFileToUseFullPath)
         
         # Verify the file exists before running
-        if (-not (Test-Path $dscAdminFullPath)) {
+        if (-not (Test-Path $dscFileToUseFullPath)) {
             $script:ErrorCount++
-            Write-Log "DSC file not found at: $dscAdminFullPath" -Level 'ERROR' -Section "Dev Flows Installation"
-            Write-Log "Original path: $dscAdmin" -Level 'INFO' -Section "Dev Flows Installation"
+            Write-Log "DSC file not found at: $dscFileToUseFullPath" -Level 'ERROR' -Section "Dev Flows Installation"
+            Write-Log "Original path: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
             Write-Log "Current directory: $(Get-Location)" -Level 'INFO' -Section "Dev Flows Installation"
             Write-Log "Files in current directory: $((Get-ChildItem -File | Select-Object -First 10 | ForEach-Object { $_.Name }) -join ', ')" -Level 'INFO' -Section "Dev Flows Installation"
             End-Section "Dev Flows Installation"
             return
         }
         
-        Write-Log "Using DSC file: $dscAdminFullPath" -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "Using DSC file: $dscFileToUseFullPath" -Level 'INFO' -Section "Dev Flows Installation"
         
         # Run winget configuration through cmd.exe for better output capture
         # This approach works better for capturing all output streams
@@ -2496,7 +2584,7 @@ else {
         
         try {
             # Use cmd.exe to run winget configuration (captures output better)
-            $cmdArgs = "/c `"winget configuration -f `"$dscAdminFullPath`" --accept-configuration-agreements 2>&1`""
+            $cmdArgs = "/c `"winget configuration -f `"$dscFileToUseFullPath`" --accept-configuration-agreements 2>&1`""
             $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile -Wait
             
             $outputText = Get-Content $tempOutputFile -Raw -ErrorAction SilentlyContinue
@@ -2668,9 +2756,9 @@ else {
         Write-Log "Exception during Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
     }
 
-    # clean up, Clean up, everyone wants to clean up
-    if (Test-Path $dscAdmin) {
-        Remove-Item $dscAdmin -verbose
+    # Clean up DSC file
+    if (Test-Path $dscFileToUse) {
+        Remove-Item $dscFileToUse -Force -ErrorAction SilentlyContinue
     }
     End-Section "Dev Flows Installation"
     # ending dev workload
@@ -2783,7 +2871,14 @@ else {
         Write-Host "This is non-critical - the script has completed successfully"
     }
     Write-Host "Done: Upgrading WinGet to Microsoft Store version"
-}  # End of else block (admin section)
+    
+    # Cleanup log path file
+    Remove-Item $logPathFile -ErrorAction SilentlyContinue
+    
+    Write-Log "========================================" -Level 'INFO'
+    Write-Log "PHASE 2: Main Installation & Configuration Complete" -Level 'SECTION_END'
+    Write-Log "========================================" -Level 'INFO'
+}  # End of Phase 2 (admin section)
 
 # Final Summary
 $scriptEndTime = Get-Date
