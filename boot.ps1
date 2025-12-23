@@ -2578,60 +2578,107 @@ Write-Log "========================================" -Level 'INFO'
     Start-Section "Dev Flows Installation"
     Write-Host "`n[STEP] Dev Flows Installation - Installing development tools and applications..." -ForegroundColor Cyan
     
-    # Determine which DSC file to use based on drive configuration
-    # Instead of regex editing, we use separate files: rpbush.dev.dsc.yml (with Dev Drive) or rpbush.dev.nodrive.dsc.yml (without)
-    Write-Host "  → Checking for empty secondary disk for Dev Drive..." -ForegroundColor Gray
-    
-    # Determine if we need Dev Drive or not
-    # CRITICAL: Only enable Dev Drive if there's a truly empty secondary disk (Raw or 0 partitions)
-    # Dev Drive creation fails if disk has existing partitions - must be completely empty
-    $useDevDrive = $false
-    $targetDisk = Get-Disk | Where-Object { $_.Number -ne 0 -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
-    
-    if ($targetDisk) {
-        # Check if disk is truly empty (Raw or 0 partitions)
-        try {
-            $partitions = Get-Partition -DiskNumber $targetDisk.Number -ErrorAction SilentlyContinue
-            if ($targetDisk.PartitionStyle -eq 'Raw' -or ($null -eq $partitions -or $partitions.Count -eq 0)) {
-                Write-Host "  ✓ Found empty secondary disk (Disk $($targetDisk.Number)). Enabling Dev Drive." -ForegroundColor Green
-                Write-Log "Empty secondary disk detected (Disk $($targetDisk.Number), PartitionStyle: $($targetDisk.PartitionStyle)). Using full DSC with Dev Drive." -Level 'INFO' -Section "Dev Flows Installation"
-                $useDevDrive = $true
-            } else {
-                # DISK IS NOT EMPTY - Force "No Drive" mode to prevent the crash seen in logs
-                Write-Host "  ⚠ Secondary disk has partitions. Skipping Dev Drive to preserve data." -ForegroundColor Yellow
-                Write-Log "Secondary disk detected (Disk $($targetDisk.Number)) but contains $($partitions.Count) partition(s). Skipping Dev Drive to preserve existing data." -Level 'WARNING' -Section "Dev Flows Installation"
-                $useDevDrive = $false
-            }
-        } catch {
-            Write-Host "  ⚠ Could not verify disk partition status. Skipping Dev Drive to avoid errors." -ForegroundColor Yellow
-            Write-Log "Could not check disk partition status for Disk $($targetDisk.Number). Skipping Dev Drive." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-            $useDevDrive = $false
-        }
-    } else {
-        # No secondary disk found - check if C: has enough space (75GB required)
-        try {
-            $systemDrive = Get-PSDrive -Name C -ErrorAction Stop
-            $freeSpaceGB = [math]::Round($systemDrive.Free / 1GB, 2)
-            $requiredSpaceGB = 75
-            
-            Write-Log "No secondary disk found. Checking C: drive free space: $freeSpaceGB GB (required: $requiredSpaceGB GB for Dev Drive)" -Level 'INFO' -Section "Dev Flows Installation"
-            
-            if ($freeSpaceGB -ge $requiredSpaceGB) {
-                Write-Host "  ✓ Sufficient free space on C: ($freeSpaceGB GB). Attempting Dev Drive DSC." -ForegroundColor Green
-                $useDevDrive = $true
-            } else {
-                Write-Host "  → Insufficient free space on C: ($freeSpaceGB GB). Using DSC WITHOUT Dev Drive." -ForegroundColor Yellow
-                Write-Log "Insufficient free space on C: drive for Dev Drive. Using no-dev-drive DSC." -Level 'INFO' -Section "Dev Flows Installation"
-                $useDevDrive = $false
-            }
-        } catch {
-            Write-Log "Could not check C: drive free space. Using DSC WITHOUT Dev Drive by default." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-            Write-Host "  → Could not check drive space. Using DSC without Dev Drive." -ForegroundColor Yellow
-            $useDevDrive = $false
-        }
+    # --------------------------------------------------------------------------
+    # STEP 1: FIX WINGET CATALOG ERRORS
+    # --------------------------------------------------------------------------
+    Write-Host "  → Resetting Winget sources to fix catalog connection errors..." -ForegroundColor Gray
+    Write-Log "Resetting Winget sources to fix Catalog connection errors..." -Level 'INFO' -Section "Dev Flows Installation"
+    try {
+        $resetOutput = winget source reset --force 2>&1 | Out-String
+        Write-Log "Winget source reset completed" -Level 'INFO' -Section "Dev Flows Installation"
+        Start-Sleep -Seconds 5
+        Write-Log "Updating Winget sources after reset..." -Level 'INFO' -Section "Dev Flows Installation"
+        $updateOutput = winget source update 2>&1 | Out-String
+        Write-Log "Winget source update completed after reset" -Level 'INFO' -Section "Dev Flows Installation"
+        Start-Sleep -Seconds 5
+        Write-Host "  ✓ Winget sources reset and updated" -ForegroundColor Green
+    } catch {
+        Write-Log "Winget source reset failed, but continuing with DSC execution" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+        Write-Host "  ⚠ Winget source reset had issues (continuing anyway)" -ForegroundColor Yellow
     }
+
+    # --------------------------------------------------------------------------
+    # STEP 2: DEV DRIVE PARTITIONING LOGIC (Single Drive Only)
+    # --------------------------------------------------------------------------
+    Write-Host "  → Checking disk configuration for Dev Drive..." -ForegroundColor Gray
     
-    # Select the appropriate DSC file
+    $useDevDrive = $false
+    $physicalDisks = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' }
+    
+    if ($physicalDisks.Count -eq 1) {
+        Write-Host "  ✓ Single physical drive detected. Checking space for partition shrink..." -ForegroundColor Green
+        
+        # Get the partition info for C:
+        try {
+            $cPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+            $cDrive = Get-PSDrive -Name C -ErrorAction Stop
+            $shrinkSizeGB = 75
+            $shrinkSizeBytes = $shrinkSizeGB * 1GB
+            $minFreeSpaceRequired = $shrinkSizeBytes + (10GB) # Require 75GB + 10GB buffer
+            
+            if ($cDrive.Free -gt $minFreeSpaceRequired) {
+                Write-Host "  → Shrinking C: drive by 75GB to create Dev Drive..." -ForegroundColor Yellow
+                Write-Log "Shrinking C: partition to create 75GB Dev Drive" -Level 'INFO' -Section "Dev Flows Installation"
+                
+                try {
+                    # 1. Resize C: Partition
+                    $currentSize = $cPartition.Size
+                    $newSize = $currentSize - $shrinkSizeBytes
+                    Resize-Partition -DriveLetter C -Size $newSize -ErrorAction Stop
+                    Write-Log "C: partition resized successfully (freed $shrinkSizeGB GB)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    
+                    # 2. Create Dev Drive in new unallocated space
+                    Write-Host "  → Creating Dev Drive partition..." -ForegroundColor Yellow
+                    # We find the disk C: is on
+                    $diskNumber = $cPartition.DiskNumber
+                    
+                    # Create new partition using maximum available space (which is the 75GB we just freed)
+                    $newPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -DriveLetter D -ErrorAction Stop
+                    Write-Log "New partition created on Disk $diskNumber (Drive D:)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    
+                    # 3. Format as Dev Drive (ReFS)
+                    # Note: -DevDrive parameter optimizes it automatically
+                    Write-Host "  → Formatting as Dev Drive (ReFS)..." -ForegroundColor Yellow
+                    Format-Volume -Partition $newPartition -DevDrive -FileSystem ReFS -NewFileSystemLabel "Dev Drive" -Confirm:$false -Force -ErrorAction Stop
+                    
+                    Write-Host "  ✓ Dev Drive created successfully on D:" -ForegroundColor Green
+                    Write-Log "Dev Drive created successfully on D: (ReFS format)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    $useDevDrive = $true
+                    
+                } catch {
+                    Write-Log "Failed to resize partition or create Dev Drive: $_" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                    Write-Host "  ✗ Failed to create Dev Drive partition. Skipping." -ForegroundColor Red
+                    $script:ErrorCount++
+                    $useDevDrive = $false
+                }
+            } else {
+                $freeSpaceGB = [math]::Round($cDrive.Free / 1GB, 2)
+                Write-Log "Insufficient free space on C: to create Dev Drive (Free: $freeSpaceGB GB, Required: 85 GB)" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Host "  ⚠ Insufficient space on C: to shrink ($freeSpaceGB GB free, 85 GB required). Skipping Dev Drive." -ForegroundColor Yellow
+                $useDevDrive = $false
+            }
+        } catch {
+            Write-Log "Could not access C: partition or drive information" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+            Write-Host "  ⚠ Could not check C: drive. Skipping Dev Drive." -ForegroundColor Yellow
+            $useDevDrive = $false
+        }
+
+    } elseif ($physicalDisks.Count -gt 1) {
+        Write-Log "Multiple drives detected ($($physicalDisks.Count)). Skipping new partition creation as requested." -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Host "  → Multiple drives detected ($($physicalDisks.Count)). Skipping partition creation." -ForegroundColor Yellow
+        $useDevDrive = $false
+        
+        # NOTE: If you wanted to use the second drive AS the Dev Drive (without re-partitioning),
+        # you could enable this logic here. But per your request, we do NOT create new partitions.
+    } else {
+        Write-Log "No physical disks detected or unable to enumerate disks" -Level 'WARNING' -Section "Dev Flows Installation"
+        Write-Host "  ⚠ Could not detect physical disks. Skipping Dev Drive." -ForegroundColor Yellow
+        $useDevDrive = $false
+    }
+
+    # --------------------------------------------------------------------------
+    # STEP 3: SELECT DSC FILE
+    # --------------------------------------------------------------------------
     if ($useDevDrive) {
         $dscFileToUse = $dscAdmin
         $dscFileToUseLocal = $dscAdminLocal
