@@ -1943,15 +1943,15 @@ Write-Log "========================================" -Level 'INFO'
         }
         
         # Create NFS mapping using mount command (not net use - net use is for SMB only)
-        # NFS path format: \\server\share (UNC format works with Windows NFS client)
+        # NFS path format: server:/share (literal NFS format as confirmed by user)
         $server = "NFS"
         $share = "media"
-        $nfsPath = "\\$server\$share"
+        $nfsPath = "$server:/$share"
         Write-Log "Creating NFS mapping to $nfsPath..." -Level 'INFO' -Section "Network Drive Mapping"
         Write-Host "  → Mounting N: to $nfsPath (NFS)..." -ForegroundColor Gray
         
-        # Windows NFS client - use mount command, not net use
-        $mountCmd = "mount $nfsPath $nDrive"
+        # Windows NFS client - use the exact NFS path format with anonymous option
+        $mountCmd = "mount -o anon $nfsPath $nDrive"
         $mapResult = cmd.exe /c $mountCmd 2>&1
         $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
@@ -2622,10 +2622,22 @@ Write-Log "========================================" -Level 'INFO'
                 
                 try {
                     # 1. Resize C: Partition
+                    # Check supported size to handle unmovable files
+                    $supportedSize = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
                     $currentSize = $cPartition.Size
-                    $newSize = $currentSize - $shrinkSizeBytes
-                    Resize-Partition -DriveLetter C -Size $newSize -ErrorAction Stop
-                    Write-Log "C: partition resized successfully (freed $shrinkSizeGB GB)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    $targetSize = $currentSize - $shrinkSizeBytes
+                    
+                    # Ensure we don't try to shrink more than Windows allows at this moment
+                    if ($targetSize -lt $supportedSize.SizeMin) {
+                        $targetSize = $supportedSize.SizeMin
+                        $actualShrinkGB = [math]::Round(($currentSize - $targetSize) / 1GB, 2)
+                        Write-Log "C: drive has unmovable files. Shrinking to minimum possible size ($actualShrinkGB GB) instead of full 75GB." -Level 'WARNING' -Section "Dev Flows Installation"
+                        Write-Host "  ⚠ C: drive has unmovable files. Shrinking by $actualShrinkGB GB instead of 75GB." -ForegroundColor Yellow
+                    }
+                    
+                    Resize-Partition -DriveLetter C -Size $targetSize -ErrorAction Stop
+                    $actualFreedGB = [math]::Round(($currentSize - $targetSize) / 1GB, 2)
+                    Write-Log "C: partition resized successfully (freed $actualFreedGB GB)" -Level 'SUCCESS' -Section "Dev Flows Installation"
                     
                     # 2. Create Dev Drive in new unallocated space
                     Write-Host "  → Creating Dev Drive partition..." -ForegroundColor Yellow
@@ -2703,11 +2715,34 @@ Write-Log "========================================" -Level 'INFO'
             $downloadDuration = (Get-Date) - $downloadStart
             Write-Log "Dev flows DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
         } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-            Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
-            End-Section "Dev Flows Installation"
-            return
+            # Handle 404 error for missing nodrive DSC file - fall back to main DSC file
+            $httpStatus = $null
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $httpStatus = [int]$_.Exception.Response.StatusCode
+            }
+            
+            if ($httpStatus -eq 404 -and $dscFileToUse -match "nodrive") {
+                Write-Log "No-drive DSC file not found on GitHub (404). Falling back to main DSC file..." -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Host "  ⚠ No-drive DSC not found. Using main DSC file instead..." -ForegroundColor Yellow
+                try {
+                    Invoke-WebRequest -Uri $dscAdminUri -OutFile $dscFileToUse -Force -ErrorAction Stop
+                    $downloadDuration = (Get-Date) - $downloadStart
+                    Write-Log "Main Dev flows DSC downloaded successfully as fallback (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                    Write-Host "  ✓ Main DSC file downloaded as fallback" -ForegroundColor Green
+                } catch {
+                    $script:ErrorCount++
+                    Write-Log "Failed to download fallback Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                    Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+                    End-Section "Dev Flows Installation"
+                    return
+                }
+            } else {
+                $script:ErrorCount++
+                Write-Log "Failed to download Dev flows DSC configuration" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                Write-Log "Skipping Dev flows installation due to download failure" -Level 'WARNING' -Section "Dev Flows Installation"
+                End-Section "Dev Flows Installation"
+                return
+            }
         }
     }
     
