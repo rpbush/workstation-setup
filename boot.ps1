@@ -1851,12 +1851,31 @@ else {
     Start-Section "Group Policy Update"
     
     try {
-        $gpupdateOutput = gpupdate /force 2>&1 | Out-String
-        Write-Log "Group Policy update completed" -Level 'INFO' -Section "Group Policy Update"
+        # Capture both stdout and stderr from gpupdate
+        $gpupdateOutput = & cmd.exe /c "gpupdate /force 2>&1" | Out-String
+        Write-Log "Group Policy update command executed" -Level 'INFO' -Section "Group Policy Update"
+        Write-Log "gpupdate output: $gpupdateOutput" -Level 'INFO' -Section "Group Policy Update"
         Write-Host "  ✓ Group Policy update completed" -ForegroundColor Green
         
-        # Check for MDM failures in the output
-        if ($gpupdateOutput -match "MDM.*failed|failed.*MDM|MDM Policy.*failed|Windows failed to apply the MDM") {
+        # Check for MDM failures in the output (case-insensitive, multiple patterns)
+        $mdmFailurePatterns = @(
+            "MDM.*failed",
+            "failed.*MDM",
+            "MDM Policy.*failed",
+            "Windows failed to apply the MDM",
+            "failed to apply the MDM Policy",
+            "MDM Policy settings"
+        )
+        
+        $mdmFailureDetected = $false
+        foreach ($pattern in $mdmFailurePatterns) {
+            if ($gpupdateOutput -match $pattern) {
+                $mdmFailureDetected = $true
+                break
+            }
+        }
+        
+        if ($mdmFailureDetected) {
             Write-Log "MDM failure detected in gpupdate output" -Level 'WARNING' -Section "Group Policy Update"
             Write-Host "  ⚠ MDM failure detected in Group Policy update" -ForegroundColor Yellow
             Write-Host "  → Cleaning up MDM failed registry attempts..." -ForegroundColor Gray
@@ -1865,13 +1884,38 @@ else {
             if ($cleaned) {
                 Write-Host "  ✓ MDM cleanup completed" -ForegroundColor Green
                 $script:SuccessCount++
+                if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
+                    $script:SectionResults["Group Policy Update"] = @{
+                        Status = "Success"
+                        Message = "MDM failures cleaned up"
+                    }
+                }
+            } else {
+                if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
+                    $script:SectionResults["Group Policy Update"] = @{
+                        Status = "Warning"
+                        Message = "MDM failure detected but no cleanup needed"
+                    }
+                }
             }
         } else {
             Write-Log "No MDM failures detected in gpupdate output" -Level 'INFO' -Section "Group Policy Update"
+            if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
+                $script:SectionResults["Group Policy Update"] = @{
+                    Status = "Success"
+                    Message = "Group Policy updated successfully"
+                }
+            }
         }
     } catch {
         Write-Log "Error running gpupdate: $_" -Level 'WARNING' -Section "Group Policy Update" -Exception $_
         Write-Host "  ⚠ Error running gpupdate: $_" -ForegroundColor Yellow
+        if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
+            $script:SectionResults["Group Policy Update"] = @{
+                Status = "Warning"
+                Message = "Error running gpupdate: $_"
+            }
+        }
     }
     
     End-Section "Group Policy Update"
@@ -2533,8 +2577,31 @@ else {
         
         if ($process.HasExited) {
             $processCompleted = $true
-            # Wait a bit more for async output to finish
-            Start-Sleep -Seconds 2
+            # Wait longer for async output to finish (winget can be slow to flush)
+            Start-Sleep -Seconds 5
+            
+            # Try to read any remaining output
+            try {
+                if (-not $process.StandardOutput.EndOfStream) {
+                    $remainingOutput = $process.StandardOutput.ReadToEnd()
+                    if ($remainingOutput) {
+                        $null = $script:outputBuilder.Append($remainingOutput)
+                    }
+                }
+            } catch {
+                # Ignore errors reading remaining output
+            }
+            
+            try {
+                if (-not $process.StandardError.EndOfStream) {
+                    $remainingError = $process.StandardError.ReadToEnd()
+                    if ($remainingError) {
+                        $null = $script:errorBuilder.Append($remainingError)
+                    }
+                }
+            } catch {
+                # Ignore errors reading remaining error output
+            }
         }
         
         # Clean up event handlers
@@ -2543,6 +2610,10 @@ else {
         # Write all captured output to the main log file instead of separate files
         $outputText = $script:outputBuilder.ToString()
         $errorText = $script:errorBuilder.ToString()
+        
+        # Log summary of captured output
+        Write-Log "Captured output length: $($outputText.Length) characters" -Level 'INFO' -Section "Dev Flows Installation"
+        Write-Log "Captured error length: $($errorText.Length) characters" -Level 'INFO' -Section "Dev Flows Installation"
         
         if ($outputText) {
             Write-Log "=== Winget Configuration Output ===" -Level 'INFO' -Section "Dev Flows Installation"
@@ -2594,9 +2665,21 @@ else {
                 Write-Host "    No error output captured - may be a silent failure" -ForegroundColor Yellow
             }
             
-            # Check for catalog connection errors
+            # Check for catalog connection errors in both output and error text
             $allOutput = "$outputText $errorText"
-            if ($allOutput -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error") {
+            $catalogErrorDetected = $false
+            
+            if ($allOutput -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error|An error occurred while connecting to the catalog") {
+                $catalogErrorDetected = $true
+            }
+            
+            # Also check if exit code -1978286075 with empty output might indicate catalog issues
+            if ($exitCode -eq -1978286075 -and [string]::IsNullOrWhiteSpace($outputText) -and [string]::IsNullOrWhiteSpace($errorText)) {
+                Write-Log "Exit code -1978286075 with no output captured - likely catalog connection issue" -Level 'WARNING' -Section "Dev Flows Installation"
+                $catalogErrorDetected = $true
+            }
+            
+            if ($catalogErrorDetected) {
                 Write-Host "    ERROR: Catalog connection failure detected" -ForegroundColor Red
                 Write-Host "    This may be due to:" -ForegroundColor Yellow
                 Write-Host "      - Network connectivity issues" -ForegroundColor Yellow
@@ -2613,7 +2696,12 @@ else {
             # Common error code meanings
             if ($exitCode -eq -1978286075) {
                 Write-Host "    Exit code -1978286075: Configuration processing error or package installation failure" -ForegroundColor Yellow
-                Write-Host "    Check WINGET OUTPUT and WINGET ERROR sections in log for specific package that failed" -ForegroundColor Yellow
+                if ([string]::IsNullOrWhiteSpace($outputText) -and [string]::IsNullOrWhiteSpace($errorText)) {
+                    Write-Host "    No output captured - this often indicates a catalog connection failure" -ForegroundColor Yellow
+                    Write-Host "    The catalog refresh may have failed or timed out" -ForegroundColor Yellow
+                } else {
+                    Write-Host "    Check WINGET OUTPUT and WINGET ERROR sections in log for specific package that failed" -ForegroundColor Yellow
+                }
                 Write-Log "Exit code -1978286075 typically indicates a configuration processing error or package installation failure." -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "This may be caused by: package download failure, installation conflict, or DSC resource error." -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "Check the WINGET OUTPUT and WINGET ERROR sections above for specific package or resource that failed." -Level 'INFO' -Section "Dev Flows Installation"
