@@ -2875,10 +2875,12 @@ Write-Log "========================================" -Level 'INFO'
     # Cleanup log path file
     Remove-Item $logPathFile -ErrorAction SilentlyContinue
     
-    Write-Log "========================================" -Level 'INFO'
-    Write-Log "PHASE 2: Main Installation & Configuration Complete" -Level 'SECTION_END'
-    Write-Log "========================================" -Level 'INFO'
-}  # End of Phase 2 (admin section)
+Write-Log "========================================" -Level 'INFO'
+Write-Log "PHASE 2: Main Installation & Configuration Complete" -Level 'SECTION_END'
+Write-Log "========================================" -Level 'INFO'
+
+# Cleanup log path file
+Remove-Item $logPathFile -ErrorAction SilentlyContinue
 
 # Final Summary
 $scriptEndTime = Get-Date
