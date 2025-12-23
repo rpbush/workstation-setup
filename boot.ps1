@@ -1265,10 +1265,26 @@ if (-not $ResumeAfterReboot) {
         
         Write-Log "NFS installed. Preparing for automatic reboot and resume..." -Level 'INFO'
         
+        # CRITICAL: Copy script to safe location before reboot
+        # The original path might be in a temp folder that gets cleaned up on reboot
+        $safeDir = "C:\ProgramData\WorkstationSetup"
+        if (-not (Test-Path $safeDir)) {
+            New-Item -Path $safeDir -ItemType Directory -Force | Out-Null
+            Write-Log "Created safe directory for script persistence: $safeDir" -Level 'INFO'
+        }
+        $safeScriptPath = Join-Path $safeDir "boot.ps1"
+        
+        # Copy current script to safe location
+        Write-Log "Copying script to safe location: $safeScriptPath" -Level 'INFO'
+        Copy-Item -Path $mypath -Destination $safeScriptPath -Force
+        Write-Log "Script copied successfully to safe location" -Level 'SUCCESS'
+        
         # Create a RunOnce key to auto-start this script on next login
         # We add the -ResumeAfterReboot flag here
-        $command = "PowerShell.exe -ExecutionPolicy Bypass -File `"$mypath`" -ResumeAfterReboot"
+        # IMPORTANT: Use the safe path, not the original temp path
+        $command = "PowerShell.exe -ExecutionPolicy Bypass -File `"$safeScriptPath`" -ResumeAfterReboot"
         Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "ContinueSetup" -Value $command -Force
+        Write-Log "RunOnce key created pointing to safe script location" -Level 'INFO'
         
         Write-Log "RunOnce key created. Rebooting in 10 seconds..." -Level 'INFO'
         Write-Host "Rebooting in 10 seconds... Press Ctrl+C to cancel" -ForegroundColor Yellow
@@ -1633,24 +1649,43 @@ Write-Log "========================================" -Level 'INFO'
             foreach ($server in $Servers) {
                 Write-Log "Checking connectivity to $server (attempt $attempts of $MaxRetries)..." -Level 'INFO' -Section "Network Stabilization"
                 
-                # Try ping first (ICMP)
-                $pingResult = Test-Connection -ComputerName $server -Count 1 -Quiet -ErrorAction SilentlyContinue
+                # Test actual service port (Port 445 for SMB/Windows) - more reliable than ping
+                # Many corporate networks block ICMP but allow SMB
+                $tcpResult = $null
+                try {
+                    $tcpResult = Test-NetConnection -ComputerName $server -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                } catch {
+                    # Test-NetConnection might not be available or failed
+                }
                 
-                if (-not $pingResult) {
-                    # If ping fails, try DNS resolution as fallback
-                    try {
-                        $dnsResult = [System.Net.Dns]::GetHostEntry($server)
-                        if ($dnsResult -and $dnsResult.AddressList.Count -gt 0) {
-                            Write-Log "DNS resolution successful for $server (IP: $($dnsResult.AddressList[0]))" -Level 'INFO' -Section "Network Stabilization"
-                            $pingResult = $true
+                $serverReachable = $false
+                
+                if ($tcpResult -and $tcpResult.TcpTestSucceeded) {
+                    Write-Log "$server is reachable on Port 445 (SMB)" -Level 'SUCCESS' -Section "Network Stabilization"
+                    $serverReachable = $true
+                } else {
+                    # Fallback to ping if port 445 test failed or unavailable
+                    $pingResult = Test-Connection -ComputerName $server -Count 1 -Quiet -ErrorAction SilentlyContinue
+                    
+                    if ($pingResult) {
+                        Write-Log "$server is reachable via ICMP (ping)" -Level 'SUCCESS' -Section "Network Stabilization"
+                        $serverReachable = $true
+                    } else {
+                        # Last resort: try DNS resolution
+                        try {
+                            $dnsResult = [System.Net.Dns]::GetHostEntry($server)
+                            if ($dnsResult -and $dnsResult.AddressList.Count -gt 0) {
+                                Write-Log "DNS resolution successful for $server (IP: $($dnsResult.AddressList[0]))" -Level 'INFO' -Section "Network Stabilization"
+                                $serverReachable = $true
+                            }
+                        } catch {
+                            # DNS resolution also failed
+                            Write-Log "DNS resolution failed for ${server}: $($_.Exception.Message)" -Level 'WARNING' -Section "Network Stabilization"
                         }
-                    } catch {
-                        # DNS resolution also failed
-                        Write-Log "DNS resolution failed for ${server}: $($_.Exception.Message)" -Level 'WARNING' -Section "Network Stabilization"
                     }
                 }
                 
-                if (-not $pingResult) {
+                if (-not $serverReachable) {
                     $allReachable = $false
                     Write-Host "  → Waiting for $server to be reachable..." -ForegroundColor Yellow
                     break
