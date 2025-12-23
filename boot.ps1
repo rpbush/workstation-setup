@@ -1646,7 +1646,7 @@ Write-Log "========================================" -Level 'INFO'
                         }
                     } catch {
                         # DNS resolution also failed
-                        Write-Log "DNS resolution failed for $server : $($_.Exception.Message)" -Level 'WARNING' -Section "Network Stabilization"
+                        Write-Log "DNS resolution failed for ${server}: $($_.Exception.Message)" -Level 'WARNING' -Section "Network Stabilization"
                     }
                 }
                 
