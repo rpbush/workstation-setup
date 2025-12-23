@@ -4,6 +4,18 @@
 # This script uses a phase-based execution model:
 # - Phase 1: Prerequisites (NFS, etc.) - may require reboot
 # - Phase 2: Main installation and configuration
+#
+# ELEVATION STRATEGY:
+# This script runs in USER context (non-elevated) by default to support WinGet.
+# WinGet is a per-user AppX package and does NOT work in elevated/admin contexts.
+# Microsoft's solution: WinGet automatically prompts for UAC elevation when it
+# needs admin privileges for installations, even when running from a non-elevated session.
+#
+# For other admin operations (Windows features, registry), the script elevates
+# only those specific commands using Start-Process -Verb RunAs.
+#
+# RECOMMENDED: Run this script in a non-elevated PowerShell session.
+# WinGet will handle elevation prompts automatically when needed.
 # ============================================================================
 
 # 1. PARAMETERS & PREAMBLE
@@ -16,21 +28,51 @@ Write-Output "Path of the script: $mypath"
 Write-Output "Args for script: $Args"
 Write-Output "ResumeAfterReboot: $ResumeAfterReboot"
 
-# 2. IMMEDIATE ELEVATION CHECK
-# If not admin, restart self as admin immediately to preserve variables and logs
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Requesting Elevation..." -ForegroundColor Yellow
-    # Pass the current arguments and script path to the new process
-    # Use array for ArgumentList to handle spaces/quotes properly
-    $argList = @('-ExecutionPolicy', 'Bypass', '-File', $mypath)
-    if ($ResumeAfterReboot) {
-        $argList += '-ResumeAfterReboot'
+# 2. ELEVATION STRATEGY
+# IMPORTANT: This script runs in USER context by default to support WinGet
+# WinGet is a per-user AppX package and does NOT work in elevated/admin contexts
+# WinGet will automatically prompt for UAC elevation when it needs admin for installations
+# For other admin operations (Windows features, registry), we elevate only those specific commands
+# This is Microsoft's recommended approach: run in user context, elevate per-command
+
+$script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if ($script:IsAdmin) {
+    Write-Host "WARNING: Running as Administrator. WinGet operations may fail." -ForegroundColor Yellow
+    Write-Host "For best results, run this script in a non-elevated PowerShell session." -ForegroundColor Yellow
+    Write-Host "WinGet will prompt for elevation when needed for installations." -ForegroundColor Yellow
+}
+
+# Helper function to run commands that require admin privileges
+# This elevates only the specific command, not the entire script
+function Invoke-AdminCommand {
+    param(
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$ScriptBlock,
+        [Parameter(Mandatory=$false)]
+        [string]$Description = "Administrative operation"
+    )
+    
+    if ($script:IsAdmin) {
+        # Already running as admin, execute directly
+        return & $ScriptBlock
+    } else {
+        # Not admin, need to elevate this specific command
+        Write-Host "Elevating for: $Description" -ForegroundColor Cyan
+        $tempScript = Join-Path $env:TEMP "elevated-command-$(Get-Random).ps1"
+        $ScriptBlock.ToString() | Out-File -FilePath $tempScript -Encoding UTF8 -Force
+        
+        try {
+            $process = Start-Process PowerShell -Verb RunAs -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $tempScript -Wait -PassThru -NoNewWindow
+            $exitCode = $process.ExitCode
+            Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+            return $exitCode
+        } catch {
+            Write-Warning "Failed to elevate command: $_"
+            Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+            return -1
+        }
     }
-    if ($Args.Count -gt 0) {
-        $argList += $Args
-    }
-    Start-Process PowerShell -Verb RunAs -ArgumentList $argList
-    Exit
 }
 
 # 3. PERSISTENT LOGGING SETUP
