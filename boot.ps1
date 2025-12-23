@@ -2580,32 +2580,55 @@ Write-Log "========================================" -Level 'INFO'
     
     # Determine which DSC file to use based on drive configuration
     # Instead of regex editing, we use separate files: rpbush.dev.dsc.yml (with Dev Drive) or rpbush.dev.nodrive.dsc.yml (without)
-    Write-Host "  → Checking drive space for Dev Drive feasibility..." -ForegroundColor Gray
+    Write-Host "  → Checking for empty secondary disk for Dev Drive..." -ForegroundColor Gray
     
     # Determine if we need Dev Drive or not
-    # CRITICAL: Check C: drive free space first (Dev Drive needs 75GB unallocated space)
-    # Don't assume second disk = Dev Drive is possible - check actual space availability
-    $requiredSpaceGB = 75
+    # CRITICAL: Only enable Dev Drive if there's a truly empty secondary disk (Raw or 0 partitions)
+    # Dev Drive creation fails if disk has existing partitions - must be completely empty
     $useDevDrive = $false
+    $targetDisk = Get-Disk | Where-Object { $_.Number -ne 0 -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
     
-    try {
-        $systemDrive = Get-PSDrive -Name C -ErrorAction Stop
-        $freeSpaceGB = [math]::Round($systemDrive.Free / 1GB, 2)
-        
-        Write-Log "C: drive free space: $freeSpaceGB GB (required: $requiredSpaceGB GB for Dev Drive)" -Level 'INFO' -Section "Dev Flows Installation"
-        
-        if ($freeSpaceGB -ge $requiredSpaceGB) {
-            Write-Host "  ✓ Sufficient free space on C: ($freeSpaceGB GB). Attempting Dev Drive DSC." -ForegroundColor Green
-            $useDevDrive = $true
-        } else {
-            Write-Host "  → Insufficient free space on C: ($freeSpaceGB GB). Using DSC WITHOUT Dev Drive." -ForegroundColor Yellow
-            Write-Log "Insufficient free space on C: drive for Dev Drive. Using no-dev-drive DSC." -Level 'INFO' -Section "Dev Flows Installation"
+    if ($targetDisk) {
+        # Check if disk is truly empty (Raw or 0 partitions)
+        try {
+            $partitions = Get-Partition -DiskNumber $targetDisk.Number -ErrorAction SilentlyContinue
+            if ($targetDisk.PartitionStyle -eq 'Raw' -or ($null -eq $partitions -or $partitions.Count -eq 0)) {
+                Write-Host "  ✓ Found empty secondary disk (Disk $($targetDisk.Number)). Enabling Dev Drive." -ForegroundColor Green
+                Write-Log "Empty secondary disk detected (Disk $($targetDisk.Number), PartitionStyle: $($targetDisk.PartitionStyle)). Using full DSC with Dev Drive." -Level 'INFO' -Section "Dev Flows Installation"
+                $useDevDrive = $true
+            } else {
+                # DISK IS NOT EMPTY - Force "No Drive" mode to prevent the crash seen in logs
+                Write-Host "  ⚠ Secondary disk has partitions. Skipping Dev Drive to preserve data." -ForegroundColor Yellow
+                Write-Log "Secondary disk detected (Disk $($targetDisk.Number)) but contains $($partitions.Count) partition(s). Skipping Dev Drive to preserve existing data." -Level 'WARNING' -Section "Dev Flows Installation"
+                $useDevDrive = $false
+            }
+        } catch {
+            Write-Host "  ⚠ Could not verify disk partition status. Skipping Dev Drive to avoid errors." -ForegroundColor Yellow
+            Write-Log "Could not check disk partition status for Disk $($targetDisk.Number). Skipping Dev Drive." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
             $useDevDrive = $false
         }
-    } catch {
-        Write-Log "Could not check C: drive free space. Using DSC WITHOUT Dev Drive by default." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-        Write-Host "  → Could not check drive space. Using DSC without Dev Drive." -ForegroundColor Yellow
-        $useDevDrive = $false
+    } else {
+        # No secondary disk found - check if C: has enough space (75GB required)
+        try {
+            $systemDrive = Get-PSDrive -Name C -ErrorAction Stop
+            $freeSpaceGB = [math]::Round($systemDrive.Free / 1GB, 2)
+            $requiredSpaceGB = 75
+            
+            Write-Log "No secondary disk found. Checking C: drive free space: $freeSpaceGB GB (required: $requiredSpaceGB GB for Dev Drive)" -Level 'INFO' -Section "Dev Flows Installation"
+            
+            if ($freeSpaceGB -ge $requiredSpaceGB) {
+                Write-Host "  ✓ Sufficient free space on C: ($freeSpaceGB GB). Attempting Dev Drive DSC." -ForegroundColor Green
+                $useDevDrive = $true
+            } else {
+                Write-Host "  → Insufficient free space on C: ($freeSpaceGB GB). Using DSC WITHOUT Dev Drive." -ForegroundColor Yellow
+                Write-Log "Insufficient free space on C: drive for Dev Drive. Using no-dev-drive DSC." -Level 'INFO' -Section "Dev Flows Installation"
+                $useDevDrive = $false
+            }
+        } catch {
+            Write-Log "Could not check C: drive free space. Using DSC WITHOUT Dev Drive by default." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+            Write-Host "  → Could not check drive space. Using DSC without Dev Drive." -ForegroundColor Yellow
+            $useDevDrive = $false
+        }
     }
     
     # Select the appropriate DSC file
