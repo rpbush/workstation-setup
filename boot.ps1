@@ -999,8 +999,8 @@ if (!$isAdmin) {
    }
 
    # restarting for Admin now
-	Start-Process PowerShell -wait -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$pwd'; & '$mypath' $Args;`"";
-	exit;
+	Start-Process PowerShell -wait -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$pwd'; & '$mypath' $Args;`""
+	exit
 }
 else {
    # admin section now
@@ -1905,28 +1905,32 @@ else {
                         }
                     }
                 }
-            } 
-        
-        if (Test-Path $dscOffice) {
-            Remove-Item $dscOffice -verbose
+            }
         }
         
-        # Start Outlook and Teams if they exist
-        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
-        if ($outlookPath) {
-            Start-Process outlook.exe -ErrorAction SilentlyContinue
+        # Cleanup and start applications (regardless of DSC success)
+        if ($officeDscDownloaded) {
+            if (Test-Path $dscOffice) {
+                Remove-Item $dscOffice -verbose
+            }
+            
+            # Start Outlook and Teams if they exist
+            $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+            if ($outlookPath) {
+                Start-Process outlook.exe -ErrorAction SilentlyContinue
                 Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
-        } else {
+            } else {
                 $script:WarningCount++
                 Write-Log "Outlook.exe not found. Office may not be installed yet." -Level 'WARNING' -Section "Office Installation"
-        }
-        
-        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
-        if ($teamsPath) {
-            Start-Process ms-teams.exe -ErrorAction SilentlyContinue
-        } else {
+            }
+            
+            $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+            if ($teamsPath) {
+                Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+            } else {
                 $script:WarningCount++
                 Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
+            }
         }
     }  # End of else block for Office DSC configuration
     
