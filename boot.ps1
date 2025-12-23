@@ -2740,32 +2740,7 @@ Write-Log "========================================" -Level 'INFO'
     }
     Write-Host "  ✓ WinGet configuration enabled" -ForegroundColor Green
     
-    # Refresh winget catalog to ensure connectivity
-    Write-Host "  → Refreshing winget catalog to ensure connectivity..." -ForegroundColor Gray
-    $catalogRefreshed = Refresh-WinGetCatalog -Section "Dev Flows Installation"
-    if ($catalogRefreshed) {
-        Write-Host "  ✓ Winget catalog refreshed" -ForegroundColor Green
-    } else {
-        Write-Host "  ⚠ Winget catalog refresh had issues (continuing anyway)" -ForegroundColor Yellow
-    }
-    
-    # CRITICAL: Reset Winget sources to fix catalog connection errors
-    # This is the "nuclear option" that fixes 99% of catalog sync issues
-    Write-Host "  → Resetting Winget sources to fix catalog connection errors..." -ForegroundColor Gray
-    Write-Log "Resetting Winget sources to fix Catalog connection errors..." -Level 'INFO' -Section "Dev Flows Installation"
-    try {
-        $resetOutput = winget source reset --force 2>&1 | Out-String
-        Write-Log "Winget source reset completed" -Level 'INFO' -Section "Dev Flows Installation"
-        Start-Sleep -Seconds 5
-        Write-Log "Updating Winget sources after reset..." -Level 'INFO' -Section "Dev Flows Installation"
-        $updateOutput = winget source update 2>&1 | Out-String
-        Write-Log "Winget source update completed after reset" -Level 'INFO' -Section "Dev Flows Installation"
-        Start-Sleep -Seconds 5
-        Write-Host "  ✓ Winget sources reset and updated" -ForegroundColor Green
-    } catch {
-        Write-Log "Winget source reset failed, but continuing with DSC execution" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-        Write-Host "  ⚠ Winget source reset had issues (continuing anyway)" -ForegroundColor Yellow
-    }
+    # Note: Winget source reset and catalog refresh is now done at the top of this section (STEP 1)
     
     try {
         Write-Host "  → Running winget configuration for Dev Flows (this may take 10-30 minutes)..." -ForegroundColor Gray
