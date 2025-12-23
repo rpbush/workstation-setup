@@ -21,12 +21,15 @@ Write-Output "ResumeAfterReboot: $ResumeAfterReboot"
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Requesting Elevation..." -ForegroundColor Yellow
     # Pass the current arguments and script path to the new process
-    $arguments = "-ExecutionPolicy Bypass -File `"$mypath`""
+    # Use array for ArgumentList to handle spaces/quotes properly
+    $argList = @('-ExecutionPolicy', 'Bypass', '-File', $mypath)
     if ($ResumeAfterReboot) {
-        $arguments += " -ResumeAfterReboot"
+        $argList += '-ResumeAfterReboot'
     }
-    $arguments += " $Args"
-    Start-Process PowerShell -Verb RunAs -ArgumentList $arguments
+    if ($Args.Count -gt 0) {
+        $argList += $Args
+    }
+    Start-Process PowerShell -Verb RunAs -ArgumentList $argList
     Exit
 }
 
@@ -501,27 +504,47 @@ function Wait-ForStoreInstallation {
     Write-Host "2. Wait for the installation to complete" -ForegroundColor White
     Write-Host "3. Close the Microsoft Store window when done" -ForegroundColor White
     Write-Host ""
-    Write-Host "Press ENTER after you have completed the installation (or 'S' to skip)..." -ForegroundColor Cyan
-    $response = Read-Host
-    
-    if ($response -eq 'S' -or $response -eq 's') {
-        Write-Log "User skipped $AppName installation" -Level 'WARNING' -Section "Store Installation"
-        return $false
-    }
-    
-    # If package name provided, verify installation
+    # If package name provided, poll for installation instead of blocking on Read-Host
+    # This prevents the script from hanging indefinitely if user walks away
     if ($PackageName) {
-        Start-Sleep -Seconds 2
-        if ($UseWildcard) {
-            $installed = Test-AppxPackageInstalled -PackageName $PackageName -UseWildcard
-        } else {
-            $installed = Test-AppxPackageInstalled -PackageName $PackageName
+        Write-Host "Waiting for installation to complete (Timeout: 5 minutes)..." -ForegroundColor Cyan
+        Write-Host "The script will automatically detect when installation completes." -ForegroundColor Gray
+        Write-Host "Press Ctrl+C to skip and continue..." -ForegroundColor Yellow
+        Write-Log "Polling for $AppName installation completion..." -Level 'INFO' -Section "Store Installation"
+        
+        $timeout = New-TimeSpan -Minutes 5
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $installed = $false
+        $checkInterval = 10  # Check every 10 seconds
+        
+        while ($sw.Elapsed -lt $timeout -and -not $installed) {
+            Start-Sleep -Seconds $checkInterval
+            
+            # Check if package is installed
+            if ($UseWildcard) {
+                $installed = Test-AppxPackageInstalled -PackageName $PackageName -UseWildcard
+            } else {
+                $installed = Test-AppxPackageInstalled -PackageName $PackageName
+            }
+            
+            if ($installed) {
+                $sw.Stop()
+                Write-Host "Installation detected!" -ForegroundColor Green
+                Write-Log "$AppName installation verified successfully (detected after $($sw.Elapsed.TotalSeconds.ToString('F1')) seconds)" -Level 'SUCCESS' -Section "Store Installation"
+                return $true
+            }
+            
+            # Show progress every 30 seconds
+            if (($sw.Elapsed.TotalSeconds % 30) -lt $checkInterval) {
+                $remaining = $timeout - $sw.Elapsed
+                Write-Host "  Still waiting... ($($remaining.TotalMinutes.ToString('F1')) minutes remaining)" -ForegroundColor Gray
+            }
         }
-        if ($installed) {
-            Write-Log "$AppName installation verified successfully" -Level 'SUCCESS' -Section "Store Installation"
-            return $true
-        } else {
-            Write-Log "$AppName installation could not be verified. It may still be installing." -Level 'WARNING' -Section "Store Installation"
+        $sw.Stop()
+        
+        if (-not $installed) {
+            Write-Host "Timeout reached. Installation may still be in progress." -ForegroundColor Yellow
+            Write-Log "$AppName installation could not be verified within timeout period. It may still be installing." -Level 'WARNING' -Section "Store Installation"
             return $true  # Assume user completed it
         }
     }
@@ -1218,20 +1241,28 @@ if (-not $ResumeAfterReboot) {
     $nfsNeedsReboot = $false
     $nfsInstalled = $false
     
-    # Try different feature names depending on Windows version
-    $nfsFeatureNames = @("ClientForNFS-Infrastructure", "ServicesForNFS-ClientOnly")
-    
-    foreach ($featureName in $nfsFeatureNames) {
-        if (Test-WindowsFeatureInstalled -FeatureName $featureName) {
-            Write-Log "NFS Client feature ($featureName) is already installed" -Level 'INFO' -Section "NFS Client Installation"
-            $script:AlreadySetItems += "NFS Client"
-            $nfsInstalled = $true
-            break
-        } else {
-            $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
-            if ($nfsFeature) {
-                Write-Log "Installing NFS Client feature ($featureName) - this requires a reboot..." -Level 'INFO' -Section "NFS Client Installation"
-                Write-Host "Installing NFS Client feature (this requires a reboot)..." -ForegroundColor Yellow
+    # OS capability guard: NFS Client is not supported on Windows Home editions
+    $osCaption = (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+    if ($osCaption -notmatch 'Pro|Enterprise|Education|Server') {
+        Write-Log "NFS Client not supported on this Windows edition ($osCaption). Skipping NFS configuration." -Level 'WARNING' -Section "NFS Client Installation"
+        Write-Host "  ⚠ NFS Client is not available on Windows Home edition" -ForegroundColor Yellow
+        $script:WarningCount++
+        $nfsInstalled = $false  # Mark as not installed so we skip NFS mapping
+    } else {
+        # Try different feature names depending on Windows version
+        $nfsFeatureNames = @("ClientForNFS-Infrastructure", "ServicesForNFS-ClientOnly")
+        
+        foreach ($featureName in $nfsFeatureNames) {
+            if (Test-WindowsFeatureInstalled -FeatureName $featureName) {
+                Write-Log "NFS Client feature ($featureName) is already installed" -Level 'INFO' -Section "NFS Client Installation"
+                $script:AlreadySetItems += "NFS Client"
+                $nfsInstalled = $true
+                break
+            } else {
+                $nfsFeature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+                if ($nfsFeature) {
+                    Write-Log "Installing NFS Client feature ($featureName) - this requires a reboot..." -Level 'INFO' -Section "NFS Client Installation"
+                    Write-Host "Installing NFS Client feature (this requires a reboot)..." -ForegroundColor Yellow
                 
                 try {
                     Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
@@ -1277,9 +1308,28 @@ if (-not $ResumeAfterReboot) {
         $safeScriptPath = Join-Path $safeDir "boot.ps1"
         
         # Copy current script to safe location
-        Write-Log "Copying script to safe location: $safeScriptPath" -Level 'INFO'
+        Write-Log "Copying script and DSC files to safe location..." -Level 'INFO'
         Copy-Item -Path $mypath -Destination $safeScriptPath -Force
-        Write-Log "Script copied successfully to safe location" -Level 'SUCCESS'
+        Write-Log "Script copied successfully to safe location: $safeScriptPath" -Level 'SUCCESS'
+        
+        # CRITICAL: Copy any YAML files in the same directory to the safe location
+        # This ensures offline resume capability - if script is run from a folder with local DSC files,
+        # they will be available after reboot even if the original folder is deleted
+        $sourceDir = Split-Path $mypath -Parent
+        $yamlFiles = @()
+        $yamlFiles += Get-ChildItem -Path $sourceDir -Filter "*.yaml" -ErrorAction SilentlyContinue
+        $yamlFiles += Get-ChildItem -Path $sourceDir -Filter "*.yml" -ErrorAction SilentlyContinue
+        
+        if ($yamlFiles.Count -gt 0) {
+            foreach ($yamlFile in $yamlFiles) {
+                $destPath = Join-Path $safeDir $yamlFile.Name
+                Copy-Item -Path $yamlFile.FullName -Destination $destPath -Force
+                Write-Log "Copied DSC file to safe location: $($yamlFile.Name)" -Level 'INFO'
+            }
+            Write-Log "Copied $($yamlFiles.Count) DSC file(s) to safe location for offline resume" -Level 'SUCCESS'
+        } else {
+            Write-Log "No local DSC files found in source directory - will download from GitHub after reboot" -Level 'INFO'
+        }
         
         # Create a RunOnce key to auto-start this script on next login
         # We add the -ResumeAfterReboot flag here
@@ -1814,11 +1864,47 @@ Write-Log "========================================" -Level 'INFO'
         
         Write-Log "Domain-joined workstation detected. Using logged-in user's domain credentials automatically." -Level 'INFO' -Section "Network Drive Mapping"
         
+        # SAFETY: Check if S: drive is a physical disk before mapping
+        try {
+            $volume = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '$sDrive'" -ErrorAction SilentlyContinue
+            if ($volume -and $volume.DriveType -eq 3) {  # Type 3 = Local Disk
+                Write-Log "CRITICAL: Drive $sDrive is a local physical disk! Cannot map SMB share." -Level 'ERROR' -Section "Network Drive Mapping"
+                Write-Host "  ✗ ERROR: Drive $sDrive is already in use as a physical disk" -ForegroundColor Red
+                Write-Host "    Please free up drive $sDrive or modify the script to use a different drive letter" -ForegroundColor Yellow
+                $script:ErrorCount++
+                $script:FailedItems += "Network Drive Mapping: Drive $sDrive is a physical disk"
+            } else {
+                Write-Log "Drive $sDrive is available for mapping (not a physical disk)" -Level 'INFO' -Section "Network Drive Mapping"
+            }
+        } catch {
+            # If we can't check, assume it's safe to proceed
+            Write-Log "Could not verify drive type for $sDrive, proceeding with mapping attempt" -Level 'INFO' -Section "Network Drive Mapping"
+        }
+        
         # Map N: drive to NFS:/media (NFS Network)
         $nDrive = "N:"
         $nPath = "NFS:/media"
         Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
         Write-Host "  → Mapping N: to NFS:/media..." -ForegroundColor Gray
+        
+        # SAFETY: Check if drive letter is a physical disk before mapping
+        # Prevents conflicts with USB drives or SD cards
+        try {
+            $volume = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '$nDrive'" -ErrorAction SilentlyContinue
+            if ($volume -and $volume.DriveType -eq 3) {  # Type 3 = Local Disk
+                Write-Log "CRITICAL: Drive $nDrive is a local physical disk! Cannot map NFS." -Level 'ERROR' -Section "Network Drive Mapping"
+                Write-Host "  ✗ ERROR: Drive $nDrive is already in use as a physical disk" -ForegroundColor Red
+                Write-Host "    Please free up drive $nDrive or modify the script to use a different drive letter" -ForegroundColor Yellow
+                $script:ErrorCount++
+                $script:FailedItems += "Network Drive Mapping: Drive $nDrive is a physical disk"
+            } else {
+                # Drive is either not in use or is a network drive (can be safely removed)
+                Write-Log "Drive $nDrive is available for mapping (not a physical disk)" -Level 'INFO' -Section "Network Drive Mapping"
+            }
+        } catch {
+            # If we can't check, assume it's safe to proceed (might be network drive or not exist)
+            Write-Log "Could not verify drive type for $nDrive, proceeding with mapping attempt" -Level 'INFO' -Section "Network Drive Mapping"
+        }
         
         # CRITICAL: Ensure NFS service is running and network provider is ready
         # This fixes "System error 67" for NFS caused by provider not being registered
@@ -1830,7 +1916,7 @@ Write-Log "========================================" -Level 'INFO'
             Write-Host "  ✓ NFS service is ready" -ForegroundColor Green
         }
         
-        # Remove existing mapping if it exists
+        # Remove existing mapping if it exists (only if it's a network drive)
         Write-Log "Removing any existing mapping for $nDrive..." -Level 'INFO' -Section "Network Drive Mapping"
         $deleteResult = net use $nDrive /delete /yes 2>&1
         $deleteOutput = $deleteResult | Out-String
@@ -2783,7 +2869,11 @@ Write-Log "========================================" -Level 'INFO'
         }
         
         # Log summary of packages processed
-        $packageCount = ($script:configOutput | Where-Object { $_ -match 'Installing|Processing package|Successfully installed' }).Count
+        # Use the captured output text instead of $script:configOutput (which was never set)
+        $packageCount = 0
+        if ($outputText) {
+            $packageCount = ($outputText -split "`n" | Where-Object { $_ -match 'Installing|Processing package|Successfully installed' }).Count
+        }
         if ($packageCount -gt 0) {
             Write-Log "Total packages processed: $packageCount" -Level 'INFO' -Section "Dev Flows Installation"
         }
@@ -3063,3 +3153,10 @@ Write-Host ""
 Write-Log "========================================" -Level 'INFO'
 Write-Log "For optimization data, review the log file: $logFilePath" -Level 'INFO'
 Write-Log "========================================" -Level 'INFO'
+
+# Exit with appropriate code for automation/CI compatibility
+if ($script:ErrorCount -gt 0) {
+    exit 1
+} else {
+    exit 0
+}
