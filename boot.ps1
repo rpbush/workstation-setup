@@ -128,7 +128,9 @@ function Test-WindowsFeatureInstalled {
 function Test-SoftwareInstalled {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$PackageId
+        [string]$PackageId,
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 10
     )
     
     try {
@@ -141,10 +143,91 @@ function Test-SoftwareInstalled {
             return $false
         }
         
-        # Use winget list to check if package is installed
-        $listOutput = winget list --id $PackageId --exact 2>&1
-        if ($LASTEXITCODE -eq 0 -and $listOutput -match $PackageId) {
+        # Use winget list to check if package is installed with timeout
+        $job = Start-Job -ScriptBlock {
+            param($PackageId)
+            $listOutput = winget list --id $PackageId --exact 2>&1
+            return @{
+                ExitCode = $LASTEXITCODE
+                Output = $listOutput
+                Matched = ($listOutput -match $PackageId)
+            }
+        } -ArgumentList $PackageId
+        
+        $result = $job | Wait-Job -Timeout $TimeoutSeconds | Receive-Job
+        $job | Remove-Job -Force -ErrorAction SilentlyContinue
+        
+        if ($result -and $result.ExitCode -eq 0 -and $result.Matched) {
             return $true
+        }
+    } catch {
+        # Error checking, assume not installed
+    }
+    return $false
+}
+
+# Helper function to check if Office is installed using multiple detection methods
+function Test-OfficeInstalled {
+    try {
+        # Method 1: Check for Outlook.exe (most reliable)
+        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+        if ($outlookPath) {
+            return $true
+        }
+        
+        # Method 2: Check registry for Office installation
+        $officeKeys = @(
+            "HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration",
+            "HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\16.0\Common\InstallRoot"
+        )
+        
+        foreach ($key in $officeKeys) {
+            if (Test-Path $key) {
+                return $true
+            }
+        }
+        
+        # Method 3: Check for Office installation directory
+        $officePaths = @(
+            "${env:ProgramFiles}\Microsoft Office",
+            "${env:ProgramFiles(x86)}\Microsoft Office"
+        )
+        
+        foreach ($path in $officePaths) {
+            if (Test-Path $path) {
+                $officeDirs = Get-ChildItem -Path $path -Directory -ErrorAction SilentlyContinue
+                if ($officeDirs -and $officeDirs.Count -gt 0) {
+                    return $true
+                }
+            }
+        }
+    } catch {
+        # Error checking, assume not installed
+    }
+    return $false
+}
+
+# Helper function to check if Teams is installed
+function Test-TeamsInstalled {
+    try {
+        # Check for Teams executable
+        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+        if ($teamsPath) {
+            return $true
+        }
+        
+        # Check for Teams in common installation locations
+        $teamsPaths = @(
+            "${env:LOCALAPPDATA}\Microsoft\Teams\current\Teams.exe",
+            "${env:ProgramFiles}\Microsoft\Teams\current\Teams.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Teams\current\Teams.exe"
+        )
+        
+        foreach ($path in $teamsPaths) {
+            if (Test-Path $path) {
+                return $true
+            }
         }
     } catch {
         # Error checking, assume not installed
@@ -1589,18 +1672,34 @@ else {
 
     Start-Section "Office Installation"
     
-    # Check if Office is already installed
+    # Check if Office is already installed using reliable detection methods
     $officeInstalled = $false
     $teamsInstalled = $false
     
-    if (Test-SoftwareInstalled -PackageId "Microsoft.Office") {
+    Write-Log "Checking if Microsoft Office is already installed..." -Level 'INFO' -Section "Office Installation"
+    if (Test-OfficeInstalled) {
         Write-Log "Microsoft Office is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
         $officeInstalled = $true
+    } else {
+        Write-Log "Microsoft Office not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
+        # Fallback to winget check with short timeout
+        if (Test-SoftwareInstalled -PackageId "Microsoft.Office" -TimeoutSeconds 5) {
+            Write-Log "Microsoft Office detected via winget, skipping installation" -Level 'INFO' -Section "Office Installation"
+            $officeInstalled = $true
+        }
     }
     
-    if (Test-SoftwareInstalled -PackageId "Microsoft.Teams") {
+    Write-Log "Checking if Microsoft Teams is already installed..." -Level 'INFO' -Section "Office Installation"
+    if (Test-TeamsInstalled) {
         Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
         $teamsInstalled = $true
+    } else {
+        Write-Log "Microsoft Teams not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
+        # Fallback to winget check with short timeout
+        if (Test-SoftwareInstalled -PackageId "Microsoft.Teams" -TimeoutSeconds 5) {
+            Write-Log "Microsoft Teams detected via winget, skipping installation" -Level 'INFO' -Section "Office Installation"
+            $teamsInstalled = $true
+        }
     }
     
     # If both are installed, skip DSC configuration but continue with rest of script
