@@ -1205,13 +1205,19 @@ if (-not $ResumeAfterReboot) {
             $nonAdminDscDownloaded = $true
         } catch {
             # NonAdmin DSC file doesn't exist in repo - this is optional, so don't count as error
-            if ($_.Exception.Response.StatusCode -eq 404) {
-                Write-Log "NonAdmin DSC file not found in repository (404). This is optional - skipping NonAdmin installation." -Level 'WARNING' -Section "NonAdmin DSC Installation"
+            $httpStatus = $null
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $httpStatus = [int]$_.Exception.Response.StatusCode
+            }
+            
+            if ($httpStatus -eq 404) {
+                Write-Log "NonAdmin DSC file not found (404). Skipping NonAdmin install for this run." -Level 'WARNING' -Section "NonAdmin DSC Installation"
                 Write-Host "  ⚠ NonAdmin DSC file not found in repository (optional - skipping)" -ForegroundColor Yellow
+                # Do NOT increment ErrorCount for 404s - this is a soft failure
             } else {
-                $script:WarningCount++
-                Write-Log "Failed to download NonAdmin DSC configuration" -Level 'WARNING' -Section "NonAdmin DSC Installation" -Exception $_
-                Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+                # Other HTTP errors are still warnings, not errors (file is optional)
+                Write-Log "Failed to download NonAdmin DSC configuration. Skipping NonAdmin setup for this run." -Level 'WARNING' -Section "NonAdmin DSC Installation" -Exception $_
+                Write-Host "  ⚠ NonAdmin DSC download failed (optional - skipping)" -ForegroundColor Yellow
             }
         }
     }
@@ -1934,10 +1940,17 @@ Write-Log "========================================" -Level 'INFO'
             Write-Log "Note: Could not remove existing mapping: $deleteOutput" -Level 'WARNING' -Section "Network Drive Mapping"
         }
         
-        # Create persistent mapping
-        Write-Log "Creating NFS mapping to $nPath..." -Level 'INFO' -Section "Network Drive Mapping"
-        # NFS will use logged-in user's domain credentials automatically
-        $mapResult = net use $nDrive $nPath /persistent:yes 2>&1
+        # Create NFS mapping using mount command (not net use - net use is for SMB only)
+        # NFS path format: \\server\share (UNC format works with Windows NFS client)
+        $server = "NFS"
+        $share = "media"
+        $nfsPath = "\\$server\$share"
+        Write-Log "Creating NFS mapping to $nfsPath..." -Level 'INFO' -Section "Network Drive Mapping"
+        Write-Host "  → Mounting N: to $nfsPath (NFS)..." -ForegroundColor Gray
+        
+        # Windows NFS client - use mount command, not net use
+        $mountCmd = "mount $nfsPath $nDrive"
+        $mapResult = cmd.exe /c $mountCmd 2>&1
         $mapOutput = $mapResult | Out-String
         $mapExitCode = $LASTEXITCODE
         
@@ -2011,7 +2024,12 @@ Write-Log "========================================" -Level 'INFO'
             Write-Log "6. If NFS was just installed, a reboot may be required" -Level 'WARNING' -Section "Network Drive Mapping"
             
             # Check if service is actually running now
-            $currentService = Get-Service | Where-Object { $_.Name -like "*NFS*" -or $_.DisplayName -like "*NFS*" } | Select-Object -First 1
+            # Narrow Get-Service query to avoid PermissionDenied errors from other services
+            $currentService = Get-Service -Name "NfsClnt" -ErrorAction SilentlyContinue
+            if (-not $currentService) {
+                # Try alternative service name
+                $currentService = Get-Service -Name "NfsRdr" -ErrorAction SilentlyContinue
+            }
             if ($currentService) {
                 Write-Log "Current NFS service status: $($currentService.Name) - $($currentService.Status)" -Level 'INFO' -Section "Network Drive Mapping"
             } else {
@@ -2826,6 +2844,79 @@ Write-Log "========================================" -Level 'INFO'
         
         $configDuration = (Get-Date) - $configStart
         Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
+        
+        # Auto-fallback: If Dev Drive creation failed due to "no unallocated space", retry without Dev Drive
+        if ($exitCode -ne 0 -and $useDevDrive -and ($outputText -match "There is no unallocated space available to create the Dev Drive volume" -or $errorText -match "There is no unallocated space available to create the Dev Drive volume")) {
+            Write-Log "Dev Drive DSC failed due to lack of unallocated space. Retrying Dev Flows WITHOUT Dev Drive." -Level 'WARNING' -Section "Dev Flows Installation"
+            Write-Host "  ⚠ Dev Drive creation failed (no unallocated space). Retrying without Dev Drive..." -ForegroundColor Yellow
+            
+            # Point to the no-dev-drive DSC file
+            $dscFileToUseFallback = Join-Path $env:TEMP "rpbush.dev.nodrive.dsc.yml"
+            $dscFileToUseFallbackUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/rpbush.dev.nodrive.dsc.yml"
+            
+            try {
+                Write-Log "Downloading no-dev-drive Dev flows DSC from: $dscFileToUseFallbackUri" -Level 'INFO' -Section "Dev Flows Installation"
+                Invoke-WebRequest -Uri $dscFileToUseFallbackUri -OutFile $dscFileToUseFallback -ErrorAction Stop
+                Write-Log "No-dev-drive Dev flows DSC downloaded successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
+                
+                # Re-run the configuration without Dev Drive
+                $dscFileToUseFullPath = [System.IO.Path]::GetFullPath($dscFileToUseFallback)
+                Write-Log "Retrying winget configuration without Dev Drive..." -Level 'INFO' -Section "Dev Flows Installation"
+                
+                $tempOutputFile2 = [System.IO.Path]::GetTempFileName()
+                $tempErrorFile2 = [System.IO.Path]::GetTempFileName()
+                
+                $cmdArgs = "/c `"winget configuration -f `"$dscFileToUseFullPath`" --accept-configuration-agreements 2>&1`""
+                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile2 -RedirectStandardError $tempErrorFile2 -Wait
+                
+                $outputText = Get-Content $tempOutputFile2 -Raw -ErrorAction SilentlyContinue
+                $errorText = Get-Content $tempErrorFile2 -Raw -ErrorAction SilentlyContinue
+                $exitCode = $proc.ExitCode
+                
+                # Clean up temp files
+                Remove-Item $tempOutputFile2 -Force -ErrorAction SilentlyContinue
+                Remove-Item $tempErrorFile2 -Force -ErrorAction SilentlyContinue
+                
+                Write-Log "Retry without Dev Drive completed (exit code: $exitCode)" -Level 'INFO' -Section "Dev Flows Installation"
+                
+                # Re-parse output to track packages from the retry
+                if ($outputText) {
+                    $outputLines = $outputText -split "`r?`n"
+                    foreach ($line in $outputLines) {
+                        if ($line -match 'WinGetPackage\s+\[([^\]]+)\]' -or $line -match 'Processing.*\[([^\]]+)\]') {
+                            $packageId = $matches[1]
+                            if ($packageId -and $packageId -notmatch '^\s*$') {
+                                if (-not ($script:InstalledItems -contains $packageId) -and -not ($script:AlreadySetItems -contains $packageId)) {
+                                    # Will be updated based on success/failure
+                                }
+                            }
+                        }
+                        if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                            $packageId = $matches[1]
+                            if ($packageId) {
+                                $script:InstalledItems += "Dev Flows: $packageId"
+                            }
+                        }
+                        if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                            $packageId = $matches[1]
+                            if ($packageId) {
+                                $script:AlreadySetItems += "Dev Flows: $packageId"
+                            }
+                        }
+                        if ($line -match 'Failed|Error' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                            $packageId = $matches[1]
+                            if ($packageId) {
+                                $script:FailedItems += "Dev Flows: $packageId"
+                            }
+                        }
+                    }
+                }
+            } catch {
+                $script:ErrorCount++
+                Write-Log "Retrying Dev Flows without Dev Drive failed." -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+                Write-Host "  ✗ Retry without Dev Drive failed" -ForegroundColor Red
+            }
+        }
         
         if ($exitCode -eq 0) {
             Write-Log "Dev flows DSC configuration completed successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
