@@ -108,6 +108,13 @@ $script:SuccessCount = 0
 $script:SectionResults = @{}  # Track success/failure status for each section
 $script:SectionTimings = @{}
 
+# Track detailed installation/configuration status
+$script:InstalledItems = @()      # Items that were installed/applied
+$script:AlreadySetItems = @()     # Items that were already installed/configured
+$script:FailedItems = @()         # Items that failed to install/configure
+$script:SettingsApplied = @()    # Settings that were applied
+$script:SettingsAlreadySet = @() # Settings that were already configured
+
 # Helper function to clean up MDM failed registry attempts
 function Clear-MDMFailedRegistryAttempts {
     param(
@@ -658,6 +665,7 @@ $wingetWorking = $wingetStatus.Working
 
 if ($wingetInstalled -and $wingetWorking) {
     Write-Log "WinGet is already installed and working (Version: $($wingetStatus.Version)). Skipping WinGet installation." -Level 'SUCCESS' -Section "WinGet Check"
+    $script:AlreadySetItems += "WinGet (v$($wingetStatus.Version))"
     End-Section "WinGet Check"
     $skipWinGetInstall = $true
 } else {
@@ -779,6 +787,7 @@ try {
     foreach ($featureName in $nfsFeatureNames) {
         if (Test-WindowsFeatureInstalled -FeatureName $featureName) {
             Write-Log "NFS Client feature ($featureName) is already installed" -Level 'INFO' -Section "NFS Client Installation"
+            $script:AlreadySetItems += "NFS Client"
             $nfsInstalled = $true
             break
         } else {
@@ -866,6 +875,7 @@ try {
     # Check if Windows is already permanently activated using helper function
     if (Test-WindowsActivated) {
         Write-Log "Windows is already permanently activated - skipping activation" -Level 'SUCCESS' -Section "Windows HWID Activation"
+        $script:AlreadySetItems += "Windows Activation"
         End-Section "Windows HWID Activation"
         # Continue with rest of script - don't return
     } else {
@@ -1161,6 +1171,7 @@ else {
         # Set Hidden to 2 (Show hidden files, folders, and drives)
         Set-ItemProperty -Path $explorerKey -Name "Hidden" -Value 2 -Type DWORD -Force
         Write-Log "File Explorer configured to show hidden files, folders, and drives" -Level 'SUCCESS' -Section "File Explorer Configuration"
+        $script:SettingsApplied += "File Explorer: Show hidden files/folders"
         
         # Refresh File Explorer to apply changes
         # This will restart explorer.exe to apply the registry changes
@@ -1214,6 +1225,7 @@ else {
         
         if (Test-WindowsFeatureInstalled -FeatureName $sandboxFeatureName) {
             Write-Log "Windows Sandbox feature is already installed" -Level 'INFO' -Section "Windows Sandbox Installation"
+            $script:AlreadySetItems += "Windows Sandbox"
         } else {
         $sandboxFeature = Get-WindowsOptionalFeature -Online -FeatureName $sandboxFeatureName -ErrorAction SilentlyContinue
         if ($sandboxFeature) {
@@ -1246,6 +1258,7 @@ else {
             if ($wslStatus) {
                 $wslInstalled = $true
                 Write-Host "WSL is already installed"
+                $script:AlreadySetItems += "Windows Subsystem for Linux (WSL)"
                 # Check if WSL 2 is set as default
                 $wslVersion = wsl --status 2>$null | Select-String "Default Version"
                 if ($wslVersion -notmatch "2") {
@@ -1396,6 +1409,7 @@ else {
                 if ($powerSchemes -match $standardUltimateGuid) {
                     powercfg /setactive $standardUltimateGuid 2>$null
                     Write-Host "Power profile set to Ultimate Performance (via standard GUID)"
+                    $script:SettingsApplied += "Power Profile: Ultimate Performance"
                 } elseif ($powerSchemes -match $standardHighGuid) {
                     powercfg /setactive $standardHighGuid 2>$null
                     Write-Host "Power profile set to High Performance (via standard GUID)"
@@ -1432,6 +1446,7 @@ else {
         # This is controlled by the EnableAutoTray DWORD value (0 = show all, 1 = hide some)
         Set-ItemProperty -Path $explorerPath -Name "EnableAutoTray" -Value 0 -Type DWORD -Force
         Write-Host "System tray configured to show all icons"
+        $script:SettingsApplied += "System Tray: Show all icons"
         
         # Restart Explorer to apply changes (optional, but ensures immediate effect)
         # Get-Process explorer | Stop-Process -Force
@@ -1781,6 +1796,7 @@ else {
         if (Test-AppxPackageInstalled -PackageName "Microsoft.WindowsTerminal") {
         $wtInstalled = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
             Write-Log "Windows Terminal is already installed (Version: $($wtInstalled.Version))" -Level 'INFO' -Section "Windows Terminal Installation"
+            $script:AlreadySetItems += "Windows Terminal (v$($wtInstalled.Version))"
         } else {
             Write-Host "Installing Windows Terminal using WinGet..."
             Write-Host "Reference: https://learn.microsoft.com/en-us/windows/terminal/install"
@@ -1884,6 +1900,7 @@ else {
             if ($cleaned) {
                 Write-Host "  ✓ MDM cleanup completed" -ForegroundColor Green
                 $script:SuccessCount++
+                $script:SettingsApplied += "MDM failed registry cleanup"
                 if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
                     $script:SectionResults["Group Policy Update"] = @{
                         Status = "Success"
@@ -1900,6 +1917,7 @@ else {
             }
         } else {
             Write-Log "No MDM failures detected in gpupdate output" -Level 'INFO' -Section "Group Policy Update"
+            $script:SettingsApplied += "Group Policy update"
             if (-not $script:SectionResults.ContainsKey("Group Policy Update")) {
                 $script:SectionResults["Group Policy Update"] = @{
                     Status = "Success"
@@ -1934,6 +1952,7 @@ else {
         Write-Host "  ✓ Microsoft Office is already installed" -ForegroundColor Green
         $officeInstalled = $true
         $script:SuccessCount++
+        $script:AlreadySetItems += "Microsoft Office"
     } else {
         Write-Log "Microsoft Office not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
         Write-Host "  → Office not found via direct methods, checking winget catalog (5s timeout)..." -ForegroundColor Gray
@@ -1952,10 +1971,11 @@ else {
     Write-Log "Checking if Microsoft Teams is already installed..." -Level 'INFO' -Section "Office Installation"
     Write-Host "  → Checking for Teams executable..." -ForegroundColor Gray
     if (Test-TeamsInstalled) {
-        Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
-        Write-Host "  ✓ Microsoft Teams is already installed" -ForegroundColor Green
-        $teamsInstalled = $true
-        $script:SuccessCount++
+            Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Microsoft Teams is already installed" -ForegroundColor Green
+            $teamsInstalled = $true
+            $script:SuccessCount++
+            $script:AlreadySetItems += "Microsoft Teams"
     } else {
         Write-Log "Microsoft Teams not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
         Write-Host "  → Teams not found via direct methods, checking winget catalog (5s timeout)..." -ForegroundColor Gray
@@ -2464,183 +2484,92 @@ else {
         
         Write-Log "Using DSC file: $dscAdminFullPath" -Level 'INFO' -Section "Dev Flows Installation"
         
-        # Create process info for real-time output capture
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "winget"
-        $psi.Arguments = "configuration -f `"$dscAdminFullPath`" --accept-configuration-agreements"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.CreateNoWindow = $true
+        # Run winget configuration through cmd.exe for better output capture
+        # This approach works better for capturing all output streams
+        Write-Log "Running winget configuration via cmd.exe for better output capture..." -Level 'INFO' -Section "Dev Flows Installation"
         
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $psi
+        $tempOutputFile = [System.IO.Path]::GetTempFileName()
+        $tempErrorFile = [System.IO.Path]::GetTempFileName()
+        $outputText = ""
+        $errorText = ""
+        $exitCode = -1
         
-        # Set up event handlers for real-time output using script scope
-        $outputBuilder = New-Object System.Text.StringBuilder
-        $errorBuilder = New-Object System.Text.StringBuilder
-        
-        # Register output data received event with script scope access
-        $scriptBlockOutput = {
-            param($sender, $e)
-            if (-not [string]::IsNullOrWhiteSpace($e.Data)) {
-                $line = $e.Data
-                $null = $script:outputBuilder.AppendLine($line)
-                $script:configOutput += $line
-                
-                # Parse output to identify package installations
-                # Look for patterns like: "Installing [PackageName]", "Found [PackageName]", "Successfully installed", etc.
-                if ($line -match 'Installing\s+([^\s]+|"[^"]+")' -or $line -match 'Found\s+([^\s]+|"[^"]+")') {
-                    $packageName = if ($matches[1] -match '^"(.+)"$') { $matches[1] } else { $matches[1] }
-                    if ($packageName -and $packageName -ne $script:currentPackage) {
-                        if ($script:currentPackage) {
-                            $packageDuration = (Get-Date) - $script:packageStartTime
-                            Write-Log "Completed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
-                        }
-                        $script:currentPackage = $packageName
-                        $script:packageStartTime = Get-Date
-                        Write-Log "Installing: $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
-                    }
-                } elseif ($line -match 'Successfully\s+installed|Installation\s+completed|Package\s+installed' -and $script:currentPackage) {
-                    $packageDuration = (Get-Date) - $script:packageStartTime
-                    Write-Log "Successfully installed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                    $script:currentPackage = $null
-                } elseif ($line -match 'Skipping|Already\s+installed|No\s+change' -and $script:currentPackage) {
-                    Write-Log "Skipped (already installed): $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
-                    $script:currentPackage = $null
-                } elseif ($line -match 'Error|Failed|Exception' -and $script:currentPackage) {
-                    Write-Log "Failed: $script:currentPackage - $line" -Level 'ERROR' -Section "Dev Flows Installation"
-                    $script:currentPackage = $null
-                } elseif ($line -match 'Processing\s+([^\s]+|"[^"]+")|Applying\s+([^\s]+|"[^"]+")') {
-                    # Try to extract package ID from processing/applying messages
-                    $packageId = if ($matches[1]) { 
-                        if ($matches[1] -match '^"(.+)"$') { $matches[1] } else { $matches[1] }
-                    } elseif ($matches[2]) {
-                        if ($matches[2] -match '^"(.+)"$') { $matches[2] } else { $matches[2] }
-                    }
-                    if ($packageId -and $packageId -ne $script:currentPackage) {
-                        if ($script:currentPackage) {
-                            $packageDuration = (Get-Date) - $script:packageStartTime
-                            Write-Log "Completed: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
-                        }
-                        $script:currentPackage = $packageId
-                        $script:packageStartTime = Get-Date
-                        Write-Log "Processing package: $script:currentPackage" -Level 'INFO' -Section "Dev Flows Installation"
-                    }
-                }
-                
-                # Also log important progress lines in real-time
-                if ($line -match 'Configuration\s+unit|Applying|Validating|Progress|Unit\s+\[') {
-                    Write-Log "Progress: $line" -Level 'INFO' -Section "Dev Flows Installation"
-                }
-            }
-        }
-        
-        $scriptBlockError = {
-            param($sender, $e)
-            if (-not [string]::IsNullOrWhiteSpace($e.Data)) {
-                $line = $e.Data
-                $null = $script:errorBuilder.AppendLine($line)
-                $script:configOutput += $line
-                Write-Log "Error output: $line" -Level 'ERROR' -Section "Dev Flows Installation"
-            }
-        }
-        
-        # Store references in script scope for event handlers
-        $script:outputBuilder = $outputBuilder
-        $script:errorBuilder = $errorBuilder
-        $script:configOutput = $configOutput
-        
-        Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $scriptBlockOutput | Out-Null
-        Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $scriptBlockError | Out-Null
-        
-        # Start the process
-        Write-Log "Starting winget configuration process..." -Level 'INFO' -Section "Dev Flows Installation"
-        $process.Start() | Out-Null
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
-        
-        # Wait for process to complete with timeout (30 minutes max)
-        $timeoutMinutes = 30
-        $timeout = (Get-Date).AddMinutes($timeoutMinutes)
-        $processCompleted = $false
-        
-        while (-not $process.HasExited) {
-            Start-Sleep -Milliseconds 500
-            if ((Get-Date) -gt $timeout) {
-                Write-Log "winget configuration process exceeded timeout of $timeoutMinutes minutes. Terminating..." -Level 'ERROR' -Section "Dev Flows Installation"
-                $process.Kill()
-                $processCompleted = $false
-                break
-            }
-        }
-        
-        if ($process.HasExited) {
-            $processCompleted = $true
-            # Wait longer for async output to finish (winget can be slow to flush)
-            Start-Sleep -Seconds 5
+        try {
+            # Use cmd.exe to run winget configuration (captures output better)
+            $cmdArgs = "/c `"winget configuration -f `"$dscAdminFullPath`" --accept-configuration-agreements 2>&1`""
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile -Wait
             
-            # Try to read any remaining output
-            try {
-                if (-not $process.StandardOutput.EndOfStream) {
-                    $remainingOutput = $process.StandardOutput.ReadToEnd()
-                    if ($remainingOutput) {
-                        $null = $script:outputBuilder.Append($remainingOutput)
-                    }
-                }
-            } catch {
-                # Ignore errors reading remaining output
-            }
+            $outputText = Get-Content $tempOutputFile -Raw -ErrorAction SilentlyContinue
+            $errorText = Get-Content $tempErrorFile -Raw -ErrorAction SilentlyContinue
+            $exitCode = $proc.ExitCode
             
-            try {
-                if (-not $process.StandardError.EndOfStream) {
-                    $remainingError = $process.StandardError.ReadToEnd()
-                    if ($remainingError) {
-                        $null = $script:errorBuilder.Append($remainingError)
+            # Clean up temp files
+            Remove-Item $tempOutputFile -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempErrorFile -Force -ErrorAction SilentlyContinue
+            
+            Write-Log "winget configuration completed via cmd.exe (exit code: $exitCode)" -Level 'INFO' -Section "Dev Flows Installation"
+            Write-Log "Output length: $($outputText.Length) characters, Error length: $($errorText.Length) characters" -Level 'INFO' -Section "Dev Flows Installation"
+            
+            # Parse output to track installed packages
+            if ($outputText) {
+                $outputLines = $outputText -split "`r?`n"
+                foreach ($line in $outputLines) {
+                    if ($line -match 'WinGetPackage\s+\[([^\]]+)\]' -or $line -match 'Processing.*\[([^\]]+)\]') {
+                        $packageId = $matches[1]
+                        if ($packageId -and $packageId -notmatch '^\s*$') {
+                            # Track package processing
+                            if (-not ($script:InstalledItems -contains $packageId) -and -not ($script:AlreadySetItems -contains $packageId)) {
+                                # Will be updated based on success/failure
+                            }
+                        }
+                    }
+                    if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                        $packageId = $matches[1]
+                        if ($packageId) {
+                            $script:InstalledItems += "Dev Flows: $packageId"
+                        }
+                    }
+                    if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                        $packageId = $matches[1]
+                        if ($packageId) {
+                            $script:AlreadySetItems += "Dev Flows: $packageId"
+                        }
+                    }
+                    if ($line -match 'Failed|Error' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                        $packageId = $matches[1]
+                        if ($packageId) {
+                            $script:FailedItems += "Dev Flows: $packageId"
+                        }
                     }
                 }
-            } catch {
-                # Ignore errors reading remaining error output
             }
+        } catch {
+            Write-Log "Error running winget configuration via cmd.exe: $_" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
+            $exitCode = -1
         }
         
-        # Clean up event handlers
-        Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
-        
-        # Write all captured output to the main log file instead of separate files
-        $outputText = $script:outputBuilder.ToString()
-        $errorText = $script:errorBuilder.ToString()
-        
-        # Log summary of captured output
-        Write-Log "Captured output length: $($outputText.Length) characters" -Level 'INFO' -Section "Dev Flows Installation"
-        Write-Log "Captured error length: $($errorText.Length) characters" -Level 'INFO' -Section "Dev Flows Installation"
-        
+        # Log the captured output
         if ($outputText) {
             Write-Log "=== Winget Configuration Output ===" -Level 'INFO' -Section "Dev Flows Installation"
-            $outputText -split "`r?`n" | ForEach-Object {
-                if (-not [string]::IsNullOrWhiteSpace($_)) {
-                    Write-Log "WINGET OUTPUT: $_" -Level 'INFO' -Section "Dev Flows Installation"
+            $outputLines = $outputText -split "`r?`n"
+            foreach ($line in $outputLines) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-Log "WINGET OUTPUT: $line" -Level 'INFO' -Section "Dev Flows Installation"
                 }
             }
         }
         
         if ($errorText) {
             Write-Log "=== Winget Configuration Errors ===" -Level 'ERROR' -Section "Dev Flows Installation"
-            $errorText -split "`r?`n" | ForEach-Object {
-                if (-not [string]::IsNullOrWhiteSpace($_)) {
-                    Write-Log "WINGET ERROR: $_" -Level 'ERROR' -Section "Dev Flows Installation"
+            $errorLines = $errorText -split "`r?`n"
+            foreach ($line in $errorLines) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-Log "WINGET ERROR: $line" -Level 'ERROR' -Section "Dev Flows Installation"
                 }
             }
         }
         
         $configDuration = (Get-Date) - $configStart
-        $exitCode = $process.ExitCode
-        
-        if ($script:currentPackage) {
-            $packageDuration = (Get-Date) - $script:packageStartTime
-            Write-Log "Final package status: $script:currentPackage (Duration: $($packageDuration.TotalSeconds.ToString('F1')) seconds)" -Level 'INFO' -Section "Dev Flows Installation"
-        }
-        
         Write-Log "winget configuration process completed with exit code: $exitCode (Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -Level 'INFO' -Section "Dev Flows Installation"
         
         if ($exitCode -eq 0) {
@@ -2651,10 +2580,18 @@ else {
                 Status = "Success"
                 Message = "Dev Flows installed via DSC"
             }
+            # If no packages were tracked individually, mark the whole section as installed
+            if ($script:InstalledItems.Count -eq 0 -or ($script:InstalledItems | Where-Object { $_ -like "Dev Flows:*" }).Count -eq 0) {
+                $script:InstalledItems += "Dev Flows: All packages"
+            }
         } else {
             $script:ErrorCount++
             Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
             Write-Host "  ✗ Dev Flows installation failed (exit code: $exitCode, Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -ForegroundColor Red
+            # Mark Dev Flows as failed if no individual packages were tracked
+            if (($script:FailedItems | Where-Object { $_ -like "Dev Flows:*" }).Count -eq 0) {
+                $script:FailedItems += "Dev Flows: Installation failed (exit code: $exitCode)"
+            }
             
             # Provide detailed error information
             if ($errorText) {
@@ -2912,6 +2849,46 @@ if ($untrackedSections.Count -gt 0) {
         } else {
             Write-Host "  ○ $section" -ForegroundColor Yellow
         }
+    }
+    Write-Host ""
+}
+
+# Detailed Configuration Summary
+Write-Host "DETAILED CONFIGURATION SUMMARY" -ForegroundColor White
+Write-Host ""
+
+# Software/Items Installed
+if ($script:InstalledItems.Count -gt 0) {
+    Write-Host "✓ INSTALLED/APPLIED ($($script:InstalledItems.Count)):" -ForegroundColor Green
+    foreach ($item in $script:InstalledItems | Sort-Object) {
+        Write-Host "  ✓ $item" -ForegroundColor Green
+    }
+    Write-Host ""
+}
+
+# Software/Items Already Set
+if ($script:AlreadySetItems.Count -gt 0) {
+    Write-Host "○ ALREADY INSTALLED/CONFIGURED ($($script:AlreadySetItems.Count)):" -ForegroundColor Yellow
+    foreach ($item in $script:AlreadySetItems | Sort-Object) {
+        Write-Host "  ○ $item" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
+# Settings Applied
+if ($script:SettingsApplied.Count -gt 0) {
+    Write-Host "✓ SETTINGS APPLIED ($($script:SettingsApplied.Count)):" -ForegroundColor Green
+    foreach ($setting in $script:SettingsApplied | Sort-Object) {
+        Write-Host "  ✓ $setting" -ForegroundColor Green
+    }
+    Write-Host ""
+}
+
+# Failed Items
+if ($script:FailedItems.Count -gt 0) {
+    Write-Host "✗ FAILED TO INSTALL/CONFIGURE ($($script:FailedItems.Count)):" -ForegroundColor Red
+    foreach ($item in $script:FailedItems | Sort-Object) {
+        Write-Host "  ✗ $item" -ForegroundColor Red
     }
     Write-Host ""
 }
