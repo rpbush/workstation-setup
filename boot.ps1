@@ -104,6 +104,8 @@ $ErrorActionPreference = 'Continue'
 # Track errors globally
 $script:ErrorCount = 0
 $script:WarningCount = 0
+$script:SuccessCount = 0
+$script:SectionResults = @{}  # Track success/failure status for each section
 $script:SectionTimings = @{}
 
 # Helper function to check if Windows feature is installed
@@ -399,20 +401,28 @@ function Refresh-WinGetCatalog {
     
     try {
         Write-Log "Refreshing winget catalog to ensure connectivity..." -Level 'INFO' -Section $Section
+        Write-Host "    → Running 'winget source update'..." -ForegroundColor Gray
+        
+        $refreshStart = Get-Date
         $refreshOutput = winget source update 2>&1 | Out-String
+        $refreshDuration = (Get-Date) - $refreshStart
+        
         if ($LASTEXITCODE -eq 0) {
-            Write-Log "Winget catalog refreshed successfully" -Level 'SUCCESS' -Section $Section
+            Write-Log "Winget catalog refreshed successfully (Duration: $($refreshDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section $Section
+            Write-Log "Catalog refresh output: $refreshOutput" -Level 'INFO' -Section $Section
             return $true
         } else {
-            Write-Log "Winget catalog refresh completed with warnings (exit code: $LASTEXITCODE)" -Level 'WARNING' -Section $Section
+            Write-Log "Winget catalog refresh completed with warnings (exit code: $LASTEXITCODE, Duration: $($refreshDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'WARNING' -Section $Section
             Write-Log "Output: $refreshOutput" -Level 'INFO' -Section $Section
+            Write-Host "    ⚠ Catalog refresh had warnings (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
             # Still return true as this is not critical - catalog might be recent enough
             return $true
         }
     } catch {
         Write-Log "Failed to refresh winget catalog, but continuing anyway: $_" -Level 'WARNING' -Section $Section
+        Write-Host "    ⚠ Catalog refresh failed: $_ (continuing anyway)" -ForegroundColor Yellow
         # Don't fail the whole process if catalog refresh fails
-        return $true
+        return $false
     }
 }
 
@@ -1697,116 +1707,203 @@ else {
     gpupdate /force
 
     Start-Section "Office Installation"
+    Write-Host "`n[STEP] Office Installation - Checking if Office is already installed..." -ForegroundColor Cyan
     
     # Check if Office is already installed using reliable detection methods
     $officeInstalled = $false
     $teamsInstalled = $false
     
     Write-Log "Checking if Microsoft Office is already installed..." -Level 'INFO' -Section "Office Installation"
+    Write-Host "  → Checking for Outlook.exe and Office registry keys..." -ForegroundColor Gray
     if (Test-OfficeInstalled) {
-        Write-Log "Microsoft Office is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
+        Write-Log "Microsoft Office is already installed, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
+        Write-Host "  ✓ Microsoft Office is already installed" -ForegroundColor Green
         $officeInstalled = $true
+        $script:SuccessCount++
     } else {
         Write-Log "Microsoft Office not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
+        Write-Host "  → Office not found via direct methods, checking winget catalog (5s timeout)..." -ForegroundColor Gray
         # Fallback to winget check with short timeout
         if (Test-SoftwareInstalled -PackageId "Microsoft.Office" -TimeoutSeconds 5) {
-            Write-Log "Microsoft Office detected via winget, skipping installation" -Level 'INFO' -Section "Office Installation"
+            Write-Log "Microsoft Office detected via winget, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Microsoft Office detected via winget" -ForegroundColor Green
             $officeInstalled = $true
+            $script:SuccessCount++
+        } else {
+            Write-Log "Microsoft Office not detected - will attempt installation" -Level 'INFO' -Section "Office Installation"
+            Write-Host "  → Office not found - will install via DSC" -ForegroundColor Yellow
         }
     }
     
     Write-Log "Checking if Microsoft Teams is already installed..." -Level 'INFO' -Section "Office Installation"
+    Write-Host "  → Checking for Teams executable..." -ForegroundColor Gray
     if (Test-TeamsInstalled) {
-        Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'INFO' -Section "Office Installation"
+        Write-Log "Microsoft Teams is already installed, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
+        Write-Host "  ✓ Microsoft Teams is already installed" -ForegroundColor Green
         $teamsInstalled = $true
+        $script:SuccessCount++
     } else {
         Write-Log "Microsoft Teams not detected via direct methods, checking winget (with timeout)..." -Level 'INFO' -Section "Office Installation"
+        Write-Host "  → Teams not found via direct methods, checking winget catalog (5s timeout)..." -ForegroundColor Gray
         # Fallback to winget check with short timeout
         if (Test-SoftwareInstalled -PackageId "Microsoft.Teams" -TimeoutSeconds 5) {
-            Write-Log "Microsoft Teams detected via winget, skipping installation" -Level 'INFO' -Section "Office Installation"
+            Write-Log "Microsoft Teams detected via winget, skipping installation" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Microsoft Teams detected via winget" -ForegroundColor Green
             $teamsInstalled = $true
+            $script:SuccessCount++
+        } else {
+            Write-Log "Microsoft Teams not detected - will attempt installation" -Level 'INFO' -Section "Office Installation"
+            Write-Host "  → Teams not found - will install via DSC" -ForegroundColor Yellow
         }
     }
     
     # If Office is already installed, skip DSC configuration to avoid conflicts
     # The DSC configuration installs both Office and Teams, so if Office exists, skip it
     if ($officeInstalled) {
+        Write-Host "`n[SKIP] Office is already installed - skipping DSC configuration to avoid conflicts" -ForegroundColor Green
         if ($teamsInstalled) {
             Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Both Office and Teams are installed" -ForegroundColor Green
         } else {
             Write-Log "Office is already installed, skipping DSC configuration. Teams can be installed separately if needed." -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  → Office installed, Teams not found (can be installed separately if needed)" -ForegroundColor Yellow
         }
         # Start Outlook if it exists
         $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
         if ($outlookPath) {
             Start-Process outlook.exe -ErrorAction SilentlyContinue
             Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Started Outlook" -ForegroundColor Green
         }
         # Start Teams if it exists
         $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
         if ($teamsPath) {
             Start-Process ms-teams.exe -ErrorAction SilentlyContinue
             Write-Log "Teams started successfully" -Level 'SUCCESS' -Section "Office Installation"
+            Write-Host "  ✓ Started Teams" -ForegroundColor Green
+        }
+        # Mark Office section as successful
+        if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+            $script:SectionResults["Office Installation"] = @{
+                Status = "Success"
+                Message = "Office already installed, skipped DSC"
+            }
         }
     } else {
-    $officeDscDownloaded = $false
+        Write-Host "`n[INSTALL] Office not found - proceeding with installation via DSC" -ForegroundColor Cyan
+        $officeDscDownloaded = $false
         
         # Check if file exists locally first
+        Write-Host "  → Preparing Office DSC configuration file..." -ForegroundColor Gray
         if (Test-Path $dscOfficeLocal) {
             Write-Log "Using local Office DSC file: $dscOfficeLocal" -Level 'INFO' -Section "Office Installation"
+            Write-Host "  → Using local DSC file: $dscOfficeLocal" -ForegroundColor Gray
             Copy-Item $dscOfficeLocal $dscOffice -Force
             $officeDscDownloaded = $true
         } else {
             try {
                 Write-Log "Downloading Office DSC configuration from: $dscOfficeUri" -Level 'INFO' -Section "Office Installation"
+                Write-Host "  → Downloading Office DSC configuration..." -ForegroundColor Gray
                 $downloadStart = Get-Date
-        Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
+                Invoke-WebRequest -Uri $dscOfficeUri -OutFile $dscOffice -ErrorAction Stop
                 $downloadDuration = (Get-Date) - $downloadStart
                 Write-Log "Office DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
-        $officeDscDownloaded = $true
-    } catch {
+                Write-Host "  ✓ DSC file downloaded ($($downloadDuration.TotalSeconds.ToString('F2'))s)" -ForegroundColor Green
+                $officeDscDownloaded = $true
+            } catch {
                 $script:ErrorCount++
                 Write-Log "Failed to download Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
-                Write-Log "Skipping Office installation due to download failure" -Level 'WARNING' -Section "Office Installation"
+                Write-Host "  ✗ Failed to download Office DSC configuration" -ForegroundColor Red
+                Write-Host "    Error: $_" -ForegroundColor Red
+                if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+                    $script:SectionResults["Office Installation"] = @{
+                        Status = "Failed"
+                        Message = "Failed to download DSC configuration: $_"
+                    }
+                }
             }
-    }
+        }
     
-    if ($officeDscDownloaded) {
+        if ($officeDscDownloaded) {
             # Ensure WinGet configuration is enabled before running DSC
+            Write-Host "  → Verifying WinGet configuration is enabled..." -ForegroundColor Gray
             Write-Log "Verifying WinGet configuration is enabled before Office DSC..." -Level 'INFO' -Section "Office Installation"
             $configEnabled = Ensure-WinGetConfigurationEnabled -Section "Office Installation"
             if (-not $configEnabled) {
                 $script:ErrorCount++
                 Write-Log "Cannot proceed with Office DSC - WinGet configuration features are not enabled" -Level 'ERROR' -Section "Office Installation"
+                Write-Host "  ✗ WinGet configuration features are not enabled" -ForegroundColor Red
+                if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+                    $script:SectionResults["Office Installation"] = @{
+                        Status = "Failed"
+                        Message = "WinGet configuration features not enabled"
+                    }
+                }
             } else {
+                Write-Host "  ✓ WinGet configuration enabled" -ForegroundColor Green
                 # Refresh winget catalog to ensure connectivity
-                Refresh-WinGetCatalog -Section "Office Installation"
+                Write-Host "  → Refreshing winget catalog to ensure connectivity..." -ForegroundColor Gray
+                $catalogRefreshed = Refresh-WinGetCatalog -Section "Office Installation"
+                if ($catalogRefreshed) {
+                    Write-Host "  ✓ Winget catalog refreshed" -ForegroundColor Green
+                } else {
+                    Write-Host "  ⚠ Winget catalog refresh had issues (continuing anyway)" -ForegroundColor Yellow
+                }
                 
                 try {
+                    Write-Host "  → Running winget configuration for Office (this may take a few minutes)..." -ForegroundColor Gray
                     Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
                     $configStart = Get-Date
                     $configOutput = winget configuration -f $dscOffice --accept-configuration-agreements 2>&1
-                $configDuration = (Get-Date) - $configStart
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+                    $configDuration = (Get-Date) - $configStart
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "Office DSC configuration completed successfully (Duration: $($configDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "Office Installation"
+                        Write-Host "  ✓ Office installation completed successfully ($($configDuration.TotalSeconds.ToString('F2'))s)" -ForegroundColor Green
+                        $script:SuccessCount++
+                        if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+                            $script:SectionResults["Office Installation"] = @{
+                                Status = "Success"
+                                Message = "Office installed via DSC"
+                            }
+                        }
                     } else {
                         $script:ErrorCount++
                         Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
                         $outputText = $configOutput -join ' | '
                         Write-Log "Output: $outputText" -Level 'ERROR' -Section "Office Installation"
+                        Write-Host "  ✗ Office installation failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
                         
                         # Check for catalog connection errors
                         if ($outputText -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error") {
+                            Write-Host "    ERROR: Catalog connection failure detected" -ForegroundColor Red
+                            Write-Host "    This may be due to:" -ForegroundColor Yellow
+                            Write-Host "      - Network connectivity issues" -ForegroundColor Yellow
+                            Write-Host "      - Firewall blocking winget catalog access" -ForegroundColor Yellow
+                            Write-Host "      - Winget catalog service temporarily unavailable" -ForegroundColor Yellow
+                            Write-Host "    Try running 'winget source update' manually" -ForegroundColor Yellow
                             Write-Log "Catalog connection error detected. This may indicate:" -Level 'WARNING' -Section "Office Installation"
                             Write-Log "1. Network connectivity issues" -Level 'WARNING' -Section "Office Installation"
                             Write-Log "2. Firewall blocking winget catalog access" -Level 'WARNING' -Section "Office Installation"
                             Write-Log "3. Winget catalog service temporarily unavailable" -Level 'WARNING' -Section "Office Installation"
                             Write-Log "Try running 'winget source update' manually to refresh the catalog" -Level 'INFO' -Section "Office Installation"
                         }
+                        if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+                            $script:SectionResults["Office Installation"] = @{
+                                Status = "Failed"
+                                Message = "DSC configuration failed (exit code: $LASTEXITCODE)"
+                            }
+                        }
                     }
                 } catch {
                     $script:ErrorCount++
                     Write-Log "Exception during Office DSC configuration" -Level 'ERROR' -Section "Office Installation" -Exception $_
+                    Write-Host "  ✗ Exception during Office installation: $_" -ForegroundColor Red
+                    if (-not $script:SectionResults.ContainsKey("Office Installation")) {
+                        $script:SectionResults["Office Installation"] = @{
+                            Status = "Failed"
+                            Message = "Exception: $_"
+                        }
+                    }
                 }
             } 
         
@@ -1831,7 +1928,6 @@ else {
                 $script:WarningCount++
                 Write-Log "ms-teams.exe not found. Teams may not be installed yet." -Level 'WARNING' -Section "Office Installation"
         }
-    }
     }  # End of else block for Office DSC configuration
     
     End-Section "Office Installation"
@@ -1840,13 +1936,15 @@ else {
 
     # Staring dev workload
     Start-Section "Dev Flows Installation"
+    Write-Host "`n[STEP] Dev Flows Installation - Installing development tools and applications..." -ForegroundColor Cyan
     
     # Check if a second physical drive already exists (skip dev drive creation if it does)
+    Write-Host "  → Checking physical drives..." -ForegroundColor Gray
     $physicalDrives = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' } | Sort-Object DeviceID
     $secondDriveExists = $physicalDrives.Count -gt 1
     
     if ($secondDriveExists) {
-        Write-Host "Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation from C: drive."
+        Write-Host "  ✓ Second physical drive detected ($($physicalDrives.Count) drives found). Skipping Dev Drive creation." -ForegroundColor Green
         # Check if file exists locally first
         if (Test-Path $dscAdminLocal) {
             Write-Log "Using local Dev flows DSC file: $dscAdminLocal" -Level 'INFO' -Section "Dev Flows Installation"
@@ -2082,19 +2180,34 @@ else {
     }
     
     # Ensure WinGet configuration is enabled before running DSC
+    Write-Host "  → Verifying WinGet configuration is enabled..." -ForegroundColor Gray
     Write-Log "Verifying WinGet configuration is enabled before Dev flows DSC..." -Level 'INFO' -Section "Dev Flows Installation"
     $configEnabled = Ensure-WinGetConfigurationEnabled -Section "Dev Flows Installation"
     if (-not $configEnabled) {
         $script:ErrorCount++
         Write-Log "Cannot proceed with Dev flows DSC - WinGet configuration features are not enabled" -Level 'ERROR' -Section "Dev Flows Installation"
+        Write-Host "  ✗ WinGet configuration features are not enabled" -ForegroundColor Red
+        $script:SectionResults["Dev Flows Installation"] = @{
+            Status = "Failed"
+            Message = "WinGet configuration features not enabled"
+        }
         End-Section "Dev Flows Installation"
         return
     }
+    Write-Host "  ✓ WinGet configuration enabled" -ForegroundColor Green
     
     # Refresh winget catalog to ensure connectivity
-    Refresh-WinGetCatalog -Section "Dev Flows Installation"
+    Write-Host "  → Refreshing winget catalog to ensure connectivity..." -ForegroundColor Gray
+    $catalogRefreshed = Refresh-WinGetCatalog -Section "Dev Flows Installation"
+    if ($catalogRefreshed) {
+        Write-Host "  ✓ Winget catalog refreshed" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠ Winget catalog refresh had issues (continuing anyway)" -ForegroundColor Yellow
+    }
     
     try {
+        Write-Host "  → Running winget configuration for Dev Flows (this may take 10-30 minutes)..." -ForegroundColor Gray
+        Write-Host "    Installing: Git, PowerShell 7, PowerToys, Signal, Steam, 7zip, Notepad++, GitHub CLI, Cursor, Windows Terminal, and more..." -ForegroundColor Gray
         Write-Log "Running winget configuration for Dev flows DSC (this may take several minutes)..." -Level 'INFO' -Section "Dev Flows Installation"
         Write-Log "DSC file contains packages: Git, PowerShell 7, PowerToys, Signal, Steam, 7zip, Notepad++, GitHub CLI, Cursor, Windows Terminal, and more..." -Level 'INFO' -Section "Dev Flows Installation"
         $configStart = Get-Date
@@ -2287,20 +2400,35 @@ else {
         
         if ($exitCode -eq 0) {
             Write-Log "Dev flows DSC configuration completed successfully" -Level 'SUCCESS' -Section "Dev Flows Installation"
+            Write-Host "  ✓ Dev Flows installation completed successfully ($($configDuration.TotalMinutes.ToString('F2')) minutes)" -ForegroundColor Green
+            $script:SuccessCount++
+            $script:SectionResults["Dev Flows Installation"] = @{
+                Status = "Success"
+                Message = "Dev Flows installed via DSC"
+            }
         } else {
             $script:ErrorCount++
             Write-Log "Dev flows DSC configuration failed with exit code: $exitCode" -Level 'ERROR' -Section "Dev Flows Installation"
+            Write-Host "  ✗ Dev Flows installation failed (exit code: $exitCode, Duration: $($configDuration.TotalMinutes.ToString('F2')) minutes)" -ForegroundColor Red
             
             # Provide detailed error information
             if ($errorText) {
                 Write-Log "Error details have been logged above. Review the WINGET ERROR section for specific failure information." -Level 'ERROR' -Section "Dev Flows Installation"
+                Write-Host "    Review WINGET ERROR section in log for details" -ForegroundColor Yellow
             } else {
                 Write-Log "No error output captured. This may indicate a silent failure or process termination." -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Host "    No error output captured - may be a silent failure" -ForegroundColor Yellow
             }
             
             # Check for catalog connection errors
             $allOutput = "$outputText $errorText"
             if ($allOutput -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error") {
+                Write-Host "    ERROR: Catalog connection failure detected" -ForegroundColor Red
+                Write-Host "    This may be due to:" -ForegroundColor Yellow
+                Write-Host "      - Network connectivity issues" -ForegroundColor Yellow
+                Write-Host "      - Firewall blocking winget catalog access" -ForegroundColor Yellow
+                Write-Host "      - Winget catalog service temporarily unavailable" -ForegroundColor Yellow
+                Write-Host "    Try running 'winget source update' manually" -ForegroundColor Yellow
                 Write-Log "Catalog connection error detected. This may indicate:" -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "1. Network connectivity issues" -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "2. Firewall blocking winget catalog access" -Level 'WARNING' -Section "Dev Flows Installation"
@@ -2310,9 +2438,16 @@ else {
             
             # Common error code meanings
             if ($exitCode -eq -1978286075) {
+                Write-Host "    Exit code -1978286075: Configuration processing error or package installation failure" -ForegroundColor Yellow
+                Write-Host "    Check WINGET OUTPUT and WINGET ERROR sections in log for specific package that failed" -ForegroundColor Yellow
                 Write-Log "Exit code -1978286075 typically indicates a configuration processing error or package installation failure." -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "This may be caused by: package download failure, installation conflict, or DSC resource error." -Level 'WARNING' -Section "Dev Flows Installation"
                 Write-Log "Check the WINGET OUTPUT and WINGET ERROR sections above for specific package or resource that failed." -Level 'INFO' -Section "Dev Flows Installation"
+            }
+            
+            $script:SectionResults["Dev Flows Installation"] = @{
+                Status = "Failed"
+                Message = "DSC configuration failed (exit code: $exitCode)"
             }
             
             # Suggest troubleshooting steps
@@ -2455,23 +2590,102 @@ else {
 $scriptEndTime = Get-Date
 $totalDuration = $scriptEndTime - $scriptStartTime
 
+Write-Host "`n" 
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "WORKSTATION SETUP SCRIPT COMPLETED" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
 Write-Log "========================================" -Level 'INFO'
 Write-Log "Workstation Setup Script Completed" -Level 'SECTION_END'
 Write-Log "========================================" -Level 'INFO'
 Write-Log "Total Execution Time: $($totalDuration.TotalMinutes.ToString('F2')) minutes ($($totalDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'INFO'
+Write-Log "Total Successes: $script:SuccessCount" -Level 'SUCCESS'
 Write-Log "Total Errors: $script:ErrorCount" -Level $(if ($script:ErrorCount -gt 0) { 'ERROR' } else { 'SUCCESS' })
 Write-Log "Total Warnings: $script:WarningCount" -Level $(if ($script:WarningCount -gt 0) { 'WARNING' } else { 'INFO' })
 Write-Log "Log File Location: $logFilePath" -Level 'INFO'
 Write-Log "========================================" -Level 'INFO'
 
+# Comprehensive Summary
+Write-Host "EXECUTION SUMMARY" -ForegroundColor White
+Write-Host "  Total Time: $($totalDuration.TotalMinutes.ToString('F2')) minutes ($($totalDuration.TotalSeconds.ToString('F2')) seconds)" -ForegroundColor Gray
+Write-Host ""
+
+# Success Summary
+$successSections = $script:SectionResults.GetEnumerator() | Where-Object { $_.Value.Status -eq "Success" }
+if ($successSections.Count -gt 0) {
+    Write-Host "✓ SUCCESSFUL SECTIONS ($($successSections.Count)):" -ForegroundColor Green
+    foreach ($section in $successSections) {
+        Write-Host "  ✓ $($section.Key)" -ForegroundColor Green
+        if ($section.Value.Message) {
+            Write-Host "    → $($section.Value.Message)" -ForegroundColor DarkGreen
+        }
+    }
+    Write-Host ""
+}
+
+# Failed Summary
+$failedSections = $script:SectionResults.GetEnumerator() | Where-Object { $_.Value.Status -eq "Failed" }
+if ($failedSections.Count -gt 0) {
+    Write-Host "✗ FAILED SECTIONS ($($failedSections.Count)):" -ForegroundColor Red
+    foreach ($section in $failedSections) {
+        Write-Host "  ✗ $($section.Key)" -ForegroundColor Red
+        if ($section.Value.Message) {
+            Write-Host "    → $($section.Value.Message)" -ForegroundColor DarkRed
+        }
+    }
+    Write-Host ""
+}
+
+# Sections without explicit results (may have succeeded or been skipped)
+$allSections = $script:SectionTimings.Keys
+$trackedSections = $script:SectionResults.Keys
+$untrackedSections = $allSections | Where-Object { $_ -notin $trackedSections }
+if ($untrackedSections.Count -gt 0) {
+    Write-Host "○ OTHER SECTIONS ($($untrackedSections.Count)):" -ForegroundColor Yellow
+    foreach ($section in $untrackedSections) {
+        $timing = $script:SectionTimings[$section]
+        if ($timing.Duration) {
+            Write-Host "  ○ $section ($($timing.Duration.TotalSeconds.ToString('F2'))s)" -ForegroundColor Yellow
+        } else {
+            Write-Host "  ○ $section" -ForegroundColor Yellow
+        }
+    }
+    Write-Host ""
+}
+
+# Error and Warning Summary
+Write-Host "STATISTICS" -ForegroundColor White
+Write-Host "  Successes: $script:SuccessCount" -ForegroundColor $(if ($script:SuccessCount -gt 0) { 'Green' } else { 'Gray' })
+Write-Host "  Errors: $script:ErrorCount" -ForegroundColor $(if ($script:ErrorCount -gt 0) { 'Red' } else { 'Gray' })
+Write-Host "  Warnings: $script:WarningCount" -ForegroundColor $(if ($script:WarningCount -gt 0) { 'Yellow' } else { 'Gray' })
+Write-Host ""
+
 # Section Timing Summary
-Write-Log "Section Timing Summary:" -Level 'INFO'
+Write-Host "SECTION TIMING SUMMARY" -ForegroundColor White
 foreach ($section in $script:SectionTimings.Keys | Sort-Object) {
     $timing = $script:SectionTimings[$section]
     if ($timing.Duration) {
+        $status = if ($script:SectionResults.ContainsKey($section)) {
+            if ($script:SectionResults[$section].Status -eq "Success") { "✓" }
+            elseif ($script:SectionResults[$section].Status -eq "Failed") { "✗" }
+            else { "○" }
+        } else { "○" }
+        $color = if ($script:SectionResults.ContainsKey($section)) {
+            if ($script:SectionResults[$section].Status -eq "Success") { "Green" }
+            elseif ($script:SectionResults[$section].Status -eq "Failed") { "Red" }
+            else { "Yellow" }
+        } else { "Gray" }
+        Write-Host "  $status $section : $($timing.Duration.TotalSeconds.ToString('F2')) seconds" -ForegroundColor $color
         Write-Log "  $section : $($timing.Duration.TotalSeconds.ToString('F2')) seconds" -Level 'INFO'
     }
 }
+Write-Host ""
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "For detailed logs, review: $logFilePath" -ForegroundColor Gray
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
 
 Write-Log "========================================" -Level 'INFO'
 Write-Log "For optimization data, review the log file: $logFilePath" -Level 'INFO'
