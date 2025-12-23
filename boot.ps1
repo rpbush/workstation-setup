@@ -1505,16 +1505,42 @@ Write-Log "========================================" -Level 'INFO'
             }
         }
         
-        # List installed distributions
+        # List installed distributions and check for Ubuntu
         Write-Host "Checking installed WSL distributions..."
+        $ubuntuInstalled = $false
         try {
             $wslList = wsl --list --verbose 2>$null
             if ($wslList) {
                 Write-Host "Installed WSL distributions:"
                 $wslList | ForEach-Object { Write-Host "  $_" }
+                # Check if Ubuntu is already installed
+                if ($wslList -match "Ubuntu") {
+                    $ubuntuInstalled = $true
+                    Write-Host "Ubuntu is already installed"
+                    $script:AlreadySetItems += "WSL Ubuntu"
+                }
             }
         } catch {
             Write-Host "No WSL distributions found or WSL not yet available"
+        }
+        
+        # Install Ubuntu if WSL is installed but Ubuntu is not
+        if ($wslInstalled -and -not $ubuntuInstalled) {
+            Write-Host "WSL is installed but Ubuntu is not. Installing Ubuntu..."
+            try {
+                $ubuntuInstallOutput = wsl --install ubuntu 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "Ubuntu installation initiated successfully"
+                    $script:InstalledItems += "WSL Ubuntu"
+                } else {
+                    Write-Log "Ubuntu installation may require user interaction or a reboot" -Level 'WARNING' -Section "WSL Installation"
+                    Write-Host "Note: Ubuntu installation may require user interaction or a system restart"
+                }
+            } catch {
+                $script:WarningCount++
+                Write-Log "Failed to install Ubuntu: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
+                Write-Host "You can install Ubuntu manually using: wsl --install ubuntu"
+            }
         }
         
     } catch {
