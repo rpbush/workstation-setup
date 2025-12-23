@@ -1858,7 +1858,9 @@ Write-Log "========================================" -Level 'INFO'
     # CRITICAL: Wait for network stability before attempting any drive mapping
     # This fixes "System error 67" caused by DNS resolution delays
     Write-Host "`n[STEP] Network Stabilization - Ensuring network is ready..." -ForegroundColor Cyan
-    $networkReady = Wait-ForNetwork -Servers @("FS-1") -MaxRetries 30 -RetryDelaySeconds 2
+    # CRITICAL: Wait for BOTH servers (FS-1 for SMB, NFS for NFS mapping)
+    # This ensures DNS resolution for "NFS" hostname is ready before attempting NFS mapping
+    $networkReady = Wait-ForNetwork -Servers @("FS-1", "NFS") -MaxRetries 30 -RetryDelaySeconds 2
     
     if (-not $networkReady) {
         Write-Host "  ⚠ Network may not be fully ready, but continuing with drive mapping..." -ForegroundColor Yellow
