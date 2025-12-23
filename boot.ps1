@@ -1204,9 +1204,15 @@ if (-not $ResumeAfterReboot) {
             Write-Log "NonAdmin DSC downloaded successfully (Duration: $($downloadDuration.TotalSeconds.ToString('F2')) seconds)" -Level 'SUCCESS' -Section "NonAdmin DSC Installation"
             $nonAdminDscDownloaded = $true
         } catch {
-            $script:ErrorCount++
-            Write-Log "Failed to download NonAdmin DSC configuration" -Level 'ERROR' -Section "NonAdmin DSC Installation" -Exception $_
-            Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+            # NonAdmin DSC file doesn't exist in repo - this is optional, so don't count as error
+            if ($_.Exception.Response.StatusCode -eq 404) {
+                Write-Log "NonAdmin DSC file not found in repository (404). This is optional - skipping NonAdmin installation." -Level 'WARNING' -Section "NonAdmin DSC Installation"
+                Write-Host "  ⚠ NonAdmin DSC file not found in repository (optional - skipping)" -ForegroundColor Yellow
+            } else {
+                $script:WarningCount++
+                Write-Log "Failed to download NonAdmin DSC configuration" -Level 'WARNING' -Section "NonAdmin DSC Installation" -Exception $_
+                Write-Log "Skipping NonAdmin installation due to download failure" -Level 'WARNING' -Section "NonAdmin DSC Installation"
+            }
         }
     }
     
@@ -1883,6 +1889,7 @@ Write-Log "========================================" -Level 'INFO'
         }
         
         # Map N: drive to NFS:/media (NFS Network)
+        # Note: NFS:/media is the correct NFS path format (not a server name issue)
         $nDrive = "N:"
         $nPath = "NFS:/media"
         Write-Log "Attempting to map $nDrive to $nPath" -Level 'INFO' -Section "Network Drive Mapping"
@@ -2555,13 +2562,31 @@ Write-Log "========================================" -Level 'INFO'
     # Instead of regex editing, we use separate files: rpbush.dev.dsc.yml (with Dev Drive) or rpbush.dev.nodrive.dsc.yml (without)
     Write-Host "  → Checking physical drives and space..." -ForegroundColor Gray
     $physicalDrives = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' } | Sort-Object DeviceID
-    $secondDriveExists = $physicalDrives.Count -gt 1
     
     # Determine if we need Dev Drive or not
+    # CRITICAL: Check if disk is actually empty/Raw, not just if it exists
+    # Dev Drive creation fails if disk has existing partitions
     $useDevDrive = $false
-    if ($secondDriveExists) {
-        Write-Host "  ✓ Second physical drive detected ($($physicalDrives.Count) drives found). Using full DSC with Dev Drive." -ForegroundColor Green
-        $useDevDrive = $true
+    $targetDisk = Get-Disk | Where-Object { $_.Number -ne 0 -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
+    
+    if ($targetDisk) {
+        # Check if disk is empty (Raw) or has unallocated space
+        try {
+            $partitions = Get-Partition -DiskNumber $targetDisk.Number -ErrorAction SilentlyContinue
+            if ($targetDisk.PartitionStyle -eq 'Raw' -or ($null -eq $partitions -or $partitions.Count -eq 0)) {
+                Write-Host "  ✓ Found empty secondary disk (Disk $($targetDisk.Number)). Enabling Dev Drive." -ForegroundColor Green
+                Write-Log "Empty secondary disk detected (Disk $($targetDisk.Number), PartitionStyle: $($targetDisk.PartitionStyle)). Using full DSC with Dev Drive." -Level 'INFO' -Section "Dev Flows Installation"
+                $useDevDrive = $true
+            } else {
+                Write-Host "  ⚠ Secondary disk detected but it contains partitions. Skipping Dev Drive creation to preserve data." -ForegroundColor Yellow
+                Write-Log "Secondary disk detected (Disk $($targetDisk.Number)) but contains $($partitions.Count) partition(s). Skipping Dev Drive to preserve existing data." -Level 'WARNING' -Section "Dev Flows Installation"
+                $useDevDrive = $false
+            }
+        } catch {
+            Write-Host "  ⚠ Could not verify disk partition status. Skipping Dev Drive creation to avoid errors." -ForegroundColor Yellow
+            Write-Log "Could not check disk partition status for Disk $($targetDisk.Number). Skipping Dev Drive." -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+            $useDevDrive = $false
+        }
     } else {
         # Check if C: has enough space (75GB required)
         try {
@@ -2653,6 +2678,24 @@ Write-Log "========================================" -Level 'INFO'
         Write-Host "  ✓ Winget catalog refreshed" -ForegroundColor Green
     } else {
         Write-Host "  ⚠ Winget catalog refresh had issues (continuing anyway)" -ForegroundColor Yellow
+    }
+    
+    # CRITICAL: Reset Winget sources to fix catalog connection errors
+    # This is the "nuclear option" that fixes 99% of catalog sync issues
+    Write-Host "  → Resetting Winget sources to fix catalog connection errors..." -ForegroundColor Gray
+    Write-Log "Resetting Winget sources to fix Catalog connection errors..." -Level 'INFO' -Section "Dev Flows Installation"
+    try {
+        $resetOutput = winget source reset --force 2>&1 | Out-String
+        Write-Log "Winget source reset completed" -Level 'INFO' -Section "Dev Flows Installation"
+        Start-Sleep -Seconds 5
+        Write-Log "Updating Winget sources after reset..." -Level 'INFO' -Section "Dev Flows Installation"
+        $updateOutput = winget source update 2>&1 | Out-String
+        Write-Log "Winget source update completed after reset" -Level 'INFO' -Section "Dev Flows Installation"
+        Start-Sleep -Seconds 5
+        Write-Host "  ✓ Winget sources reset and updated" -ForegroundColor Green
+    } catch {
+        Write-Log "Winget source reset failed, but continuing with DSC execution" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
+        Write-Host "  ⚠ Winget source reset had issues (continuing anyway)" -ForegroundColor Yellow
     }
     
     try {
