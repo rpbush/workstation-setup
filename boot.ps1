@@ -1287,6 +1287,7 @@ if (-not $ResumeAfterReboot) {
                 }
             }
         }
+        }  # Close the else block that started at line 1251 (OS capability guard)
     }
     
     # If NFS was just installed, we need to reboot
