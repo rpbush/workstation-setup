@@ -390,6 +390,32 @@ function Test-WinGetInstalled {
     }
 }
 
+# Helper function to refresh winget catalog to ensure connectivity
+function Refresh-WinGetCatalog {
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$Section = ''
+    )
+    
+    try {
+        Write-Log "Refreshing winget catalog to ensure connectivity..." -Level 'INFO' -Section $Section
+        $refreshOutput = winget source update 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Winget catalog refreshed successfully" -Level 'SUCCESS' -Section $Section
+            return $true
+        } else {
+            Write-Log "Winget catalog refresh completed with warnings (exit code: $LASTEXITCODE)" -Level 'WARNING' -Section $Section
+            Write-Log "Output: $refreshOutput" -Level 'INFO' -Section $Section
+            # Still return true as this is not critical - catalog might be recent enough
+            return $true
+        }
+    } catch {
+        Write-Log "Failed to refresh winget catalog, but continuing anyway: $_" -Level 'WARNING' -Section $Section
+        # Don't fail the whole process if catalog refresh fails
+        return $true
+    }
+}
+
 # Helper function to ensure WinGet configuration is enabled
 # This function verifies configuration is enabled by actually testing it
 function Ensure-WinGetConfigurationEnabled {
@@ -1702,10 +1728,26 @@ else {
         }
     }
     
-    # If both are installed, skip DSC configuration but continue with rest of script
-    if ($officeInstalled -and $teamsInstalled) {
-        Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
-        # Don't return here - continue to Dev Flows Installation section
+    # If Office is already installed, skip DSC configuration to avoid conflicts
+    # The DSC configuration installs both Office and Teams, so if Office exists, skip it
+    if ($officeInstalled) {
+        if ($teamsInstalled) {
+            Write-Log "Office and Teams are already installed, skipping DSC configuration" -Level 'SUCCESS' -Section "Office Installation"
+        } else {
+            Write-Log "Office is already installed, skipping DSC configuration. Teams can be installed separately if needed." -Level 'SUCCESS' -Section "Office Installation"
+        }
+        # Start Outlook if it exists
+        $outlookPath = Get-Command outlook.exe -ErrorAction SilentlyContinue
+        if ($outlookPath) {
+            Start-Process outlook.exe -ErrorAction SilentlyContinue
+            Write-Log "Outlook started successfully" -Level 'SUCCESS' -Section "Office Installation"
+        }
+        # Start Teams if it exists
+        $teamsPath = Get-Command ms-teams.exe -ErrorAction SilentlyContinue
+        if ($teamsPath) {
+            Start-Process ms-teams.exe -ErrorAction SilentlyContinue
+            Write-Log "Teams started successfully" -Level 'SUCCESS' -Section "Office Installation"
+        }
     } else {
     $officeDscDownloaded = $false
         
@@ -1737,6 +1779,9 @@ else {
                 $script:ErrorCount++
                 Write-Log "Cannot proceed with Office DSC - WinGet configuration features are not enabled" -Level 'ERROR' -Section "Office Installation"
             } else {
+                # Refresh winget catalog to ensure connectivity
+                Refresh-WinGetCatalog -Section "Office Installation"
+                
                 try {
                     Write-Log "Running winget configuration for Office DSC" -Level 'INFO' -Section "Office Installation"
                     $configStart = Get-Date
@@ -1747,7 +1792,17 @@ else {
                     } else {
                         $script:ErrorCount++
                         Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
-                        Write-Log "Output: $($configOutput -join ' | ')" -Level 'ERROR' -Section "Office Installation"
+                        $outputText = $configOutput -join ' | '
+                        Write-Log "Output: $outputText" -Level 'ERROR' -Section "Office Installation"
+                        
+                        # Check for catalog connection errors
+                        if ($outputText -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error") {
+                            Write-Log "Catalog connection error detected. This may indicate:" -Level 'WARNING' -Section "Office Installation"
+                            Write-Log "1. Network connectivity issues" -Level 'WARNING' -Section "Office Installation"
+                            Write-Log "2. Firewall blocking winget catalog access" -Level 'WARNING' -Section "Office Installation"
+                            Write-Log "3. Winget catalog service temporarily unavailable" -Level 'WARNING' -Section "Office Installation"
+                            Write-Log "Try running 'winget source update' manually to refresh the catalog" -Level 'INFO' -Section "Office Installation"
+                        }
                     }
                 } catch {
                     $script:ErrorCount++
@@ -2036,6 +2091,9 @@ else {
         return
     }
     
+    # Refresh winget catalog to ensure connectivity
+    Refresh-WinGetCatalog -Section "Dev Flows Installation"
+    
     try {
         Write-Log "Running winget configuration for Dev flows DSC (this may take several minutes)..." -Level 'INFO' -Section "Dev Flows Installation"
         Write-Log "DSC file contains packages: Git, PowerShell 7, PowerToys, Signal, Steam, 7zip, Notepad++, GitHub CLI, Cursor, Windows Terminal, and more..." -Level 'INFO' -Section "Dev Flows Installation"
@@ -2238,6 +2296,16 @@ else {
                 Write-Log "Error details have been logged above. Review the WINGET ERROR section for specific failure information." -Level 'ERROR' -Section "Dev Flows Installation"
             } else {
                 Write-Log "No error output captured. This may indicate a silent failure or process termination." -Level 'WARNING' -Section "Dev Flows Installation"
+            }
+            
+            # Check for catalog connection errors
+            $allOutput = "$outputText $errorText"
+            if ($allOutput -match "error.*connecting.*catalog|error.*occurred.*connecting|catalog.*error") {
+                Write-Log "Catalog connection error detected. This may indicate:" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "1. Network connectivity issues" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "2. Firewall blocking winget catalog access" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "3. Winget catalog service temporarily unavailable" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Log "Try running 'winget source update' manually to refresh the catalog" -Level 'INFO' -Section "Dev Flows Installation"
             }
             
             # Common error code meanings
