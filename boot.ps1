@@ -2506,9 +2506,16 @@ if (`$wslList -match 'Ubuntu') {
             # Parse output to track installed packages
             if ($outputText) {
                 $outputLines = $outputText -split "`r?`n"
+                # Define regex patterns as variables to avoid bracket interpretation issues
+                $packagePattern = 'WinGetPackage\s+' + [char]91 + '([^' + [char]93 + ']+)' + [char]93
+                $processingPattern = 'Processing.*' + [char]91 + '([^' + [char]93 + ']+)' + [char]93
                 foreach ($line in $outputLines) {
-                    if ($line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D' -or $line -match 'Processing.*\x5B([^\x5D]+)\x5D') {
-                        $packageId = $matches[1]
+                    $packageMatch = [regex]::Match($line, $packagePattern)
+                    if (-not $packageMatch.Success) {
+                        $packageMatch = [regex]::Match($line, $processingPattern)
+                    }
+                    if ($packageMatch.Success) {
+                        $packageId = $packageMatch.Groups[1].Value
                         if ($packageId -and $packageId -notmatch '^\s*$') {
                             # Track package processing
                             if (-not ($script:InstalledItems -contains $packageId) -and -not ($script:AlreadySetItems -contains $packageId)) {
@@ -2516,22 +2523,31 @@ if (`$wslList -match 'Ubuntu') {
                             }
                         }
                     }
-                    if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D') {
-                        $packageId = $matches[1]
-                        if ($packageId) {
-                            $script:InstalledItems += "Dev Flows: $packageId"
+                    if ($line -match 'Successfully|installed|completed') {
+                        $packageMatch = [regex]::Match($line, $packagePattern)
+                        if ($packageMatch.Success) {
+                            $packageId = $packageMatch.Groups[1].Value
+                            if ($packageId) {
+                                $script:InstalledItems += "Dev Flows: $packageId"
+                            }
                         }
                     }
-                    if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D') {
-                        $packageId = $matches[1]
-                        if ($packageId) {
-                            $script:AlreadySetItems += "Dev Flows: $packageId"
+                    if ($line -match 'Already\s+installed|Skipping|No\s+change') {
+                        $packageMatch = [regex]::Match($line, $packagePattern)
+                        if ($packageMatch.Success) {
+                            $packageId = $packageMatch.Groups[1].Value
+                            if ($packageId) {
+                                $script:AlreadySetItems += "Dev Flows: $packageId"
+                            }
                         }
                     }
-                    if ($line -match 'Failed|Error' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
-                        $packageId = $matches[1]
-                        if ($packageId) {
-                            $script:FailedItems += "Dev Flows: $packageId"
+                    if ($line -match 'Failed|Error') {
+                        $packageMatch = [regex]::Match($line, $packagePattern)
+                        if ($packageMatch.Success) {
+                            $packageId = $packageMatch.Groups[1].Value
+                            if ($packageId) {
+                                $script:FailedItems += "Dev Flows: $packageId"
+                            }
                         }
                     }
                 }
