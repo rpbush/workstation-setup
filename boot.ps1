@@ -701,6 +701,79 @@ function Invoke-WinGetCommand {
     }
 }
 
+# Function to parse and display winget output with progress updates
+function Show-WinGetProgress {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$OutputText,
+        [Parameter(Mandatory=$false)]
+        [string]$Section = "Installation"
+    )
+    
+    if (-not $OutputText) { return }
+    
+    $outputLines = $OutputText -split "`r?`n"
+    $currentPackage = $null
+    $packageStartTime = $null
+    
+    # Patterns to detect package names and status
+    $packagePattern = 'WinGetPackage\s+' + [char]91 + '([^' + [char]93 + ']+)' + [char]93
+    $processingPattern = 'Processing.*' + [char]91 + '([^' + [char]93 + ']+)' + [char]93
+    $foundPattern = 'Found\s+([^\s]+)'
+    
+    foreach ($line in $outputLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        
+        # Parse line for package information
+        $packageMatch = [regex]::Match($line, $packagePattern)
+        if (-not $packageMatch.Success) {
+            $packageMatch = [regex]::Match($line, $processingPattern)
+        }
+        if (-not $packageMatch.Success) {
+            $packageMatch = [regex]::Match($line, $foundPattern)
+        }
+        
+        if ($packageMatch.Success) {
+            $newPackage = $packageMatch.Groups[1].Value.Trim()
+            if ($newPackage -and $newPackage -ne $currentPackage) {
+                if ($currentPackage) {
+                    $packageDuration = if ($packageStartTime) { ((Get-Date) - $packageStartTime).TotalSeconds } else { 0 }
+                    Write-Host "    ✓ Completed: $currentPackage ($([math]::Round($packageDuration, 1))s)" -ForegroundColor Green
+                }
+                $currentPackage = $newPackage
+                $packageStartTime = Get-Date
+                Write-Host "  → Installing: $currentPackage..." -ForegroundColor Cyan
+                Write-Log "Installing package: $currentPackage" -Level 'INFO' -Section $Section
+            }
+        } elseif ($line -match 'Downloading|Downloaded' -and $currentPackage) {
+            Write-Host "    ↓ Downloading: $currentPackage..." -ForegroundColor Yellow
+        } elseif ($line -match 'Installing' -and $currentPackage) {
+            Write-Host "    ⚙ Installing: $currentPackage..." -ForegroundColor Cyan
+        } elseif ($line -match 'Verifying|Verified' -and $currentPackage) {
+            Write-Host "    ✓ Verifying: $currentPackage..." -ForegroundColor Gray
+        } elseif ($line -match 'Successfully|installed|completed' -and $currentPackage) {
+            $packageDuration = if ($packageStartTime) { ((Get-Date) - $packageStartTime).TotalSeconds } else { 0 }
+            Write-Host "    ✓ Completed: $currentPackage ($([math]::Round($packageDuration, 1))s)" -ForegroundColor Green
+            $currentPackage = $null
+            $packageStartTime = $null
+        } elseif ($line -match 'Already\s+installed|Skipping|No\s+change' -and $currentPackage) {
+            Write-Host "    ⊙ Skipped: $currentPackage (already installed)" -ForegroundColor Gray
+            $currentPackage = $null
+            $packageStartTime = $null
+        } elseif ($line -match 'Failed|Error' -and $currentPackage) {
+            Write-Host "    ✗ Failed: $currentPackage" -ForegroundColor Red
+            $currentPackage = $null
+            $packageStartTime = $null
+        }
+    }
+    
+    # Handle final package if still processing
+    if ($currentPackage) {
+        $packageDuration = if ($packageStartTime) { ((Get-Date) - $packageStartTime).TotalSeconds } else { 0 }
+        Write-Host "    ✓ Completed: $currentPackage ($([math]::Round($packageDuration, 1))s)" -ForegroundColor Green
+    }
+}
+
 # Function to check if WinGet is available and working
 # Reference: https://learn.microsoft.com/en-us/windows/package-manager/winget/
 # Note: WinGet is a per-user AppX package and may not work in elevated/admin contexts
@@ -1946,10 +2019,14 @@ if (`$wslList -match 'Ubuntu') {
             # Install Windows Terminal using winget (recommended by Microsoft)
             # Use -e for exact match and --accept-package-agreements for automation
             try {
-                winget install --id Microsoft.WindowsTerminal -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+                Write-Host "  → Installing Windows Terminal via winget..." -ForegroundColor Cyan
+                $wingetOutput = winget install --id Microsoft.WindowsTerminal -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+                
+                # Show progress from output
+                Show-WinGetProgress -OutputText $wingetOutput -Section "Windows Terminal Installation"
                 
                 if ($LASTEXITCODE -eq 0) {
-                    Write-Host "Windows Terminal installed successfully"
+                    Write-Host "  ✓ Windows Terminal installed successfully" -ForegroundColor Green
                 } else {
                     Write-Log "WinGet installation may have failed. Trying alternative method..." -Level 'WARNING' -Section "Windows Terminal Installation"
                     # Fallback: Try installing via Microsoft Store
@@ -2559,11 +2636,42 @@ if (`$wslList -match 'Ubuntu') {
         try {
             # Use cmd.exe to run winget configuration (captures output better)
             $cmdArgs = "/c `"winget configuration -f `"$dscFileToUseFullPath`" --accept-configuration-agreements 2>&1`""
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile -Wait
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile
             
+            # Monitor output file in real-time to show progress
+            $lastSize = 0
+            $processedContent = ""
+            Write-Host "  → Starting package installations..." -ForegroundColor Cyan
+            
+            while (-not $proc.HasExited) {
+                Start-Sleep -Milliseconds 500
+                
+                if (Test-Path $tempOutputFile) {
+                    $currentContent = Get-Content $tempOutputFile -Raw -ErrorAction SilentlyContinue
+                    if ($currentContent -and $currentContent.Length -gt $lastSize) {
+                        $newContent = $currentContent.Substring($lastSize)
+                        $processedContent += $newContent
+                        $lastSize = $currentContent.Length
+                        
+                        # Show progress from new content
+                        Show-WinGetProgress -OutputText $newContent -Section "Dev Flows Installation"
+                    }
+                }
+            }
+            
+            # Wait for process to fully exit
+            $proc.WaitForExit()
+            
+            # Get final output
             $outputText = Get-Content $tempOutputFile -Raw -ErrorAction SilentlyContinue
             $errorText = Get-Content $tempErrorFile -Raw -ErrorAction SilentlyContinue
             $exitCode = $proc.ExitCode
+            
+            # Show any remaining progress
+            if ($outputText -and $outputText.Length -gt $lastSize) {
+                $remainingContent = $outputText.Substring($lastSize)
+                Show-WinGetProgress -OutputText $remainingContent -Section "Dev Flows Installation"
+            }
             
             # Clean up temp files
             Remove-Item $tempOutputFile -Force -ErrorAction SilentlyContinue
