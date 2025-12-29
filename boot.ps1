@@ -2176,7 +2176,11 @@ if (`$wslList -match 'Ubuntu') {
                     } else {
                         $script:ErrorCount++
                         Write-Log "Office DSC configuration failed with exit code: $LASTEXITCODE" -Level 'ERROR' -Section "Office Installation"
-                        $outputText = $configOutput -join ' | '
+                        if ($configOutput -is [array]) {
+                            $outputText = $configOutput -join " | "
+                        } else {
+                            $outputText = $configOutput.ToString()
+                        }
                         Write-Log "Output: $outputText" -Level 'ERROR' -Section "Office Installation"
                         Write-Host "  ✗ Office installation failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
                         
@@ -2271,6 +2275,8 @@ if (`$wslList -match 'Ubuntu') {
     # --------------------------------------------------------------------------
     # STEP 2: DEV DRIVE PARTITIONING LOGIC (Single Drive Only)
     # --------------------------------------------------------------------------
+    # COMMENTED OUT - To be worked on later
+    <#
     Write-Host "  → Checking disk configuration for Dev Drive..." -ForegroundColor Gray
     
     $useDevDrive = $false
@@ -2336,8 +2342,8 @@ if (`$wslList -match 'Ubuntu') {
                 }
             } else {
                 $freeSpaceGB = [math]::Round($cDrive.Free / 1GB, 2)
-                Write-Log "Insufficient free space on C: to create Dev Drive (Free: $freeSpaceGB GB, Required: 85 GB)" -Level 'WARNING' -Section "Dev Flows Installation"
-                Write-Host "  ⚠ Insufficient space on C: to shrink ($freeSpaceGB GB free, 85 GB required). Skipping Dev Drive." -ForegroundColor Yellow
+                Write-Log "Insufficient free space on C: to create Dev Drive (Free: $($freeSpaceGB) GB, Required: 85 GB)" -Level 'WARNING' -Section "Dev Flows Installation"
+                Write-Host "  ⚠ Insufficient space on C: to shrink ($($freeSpaceGB) GB free, 85 GB required). Skipping Dev Drive." -ForegroundColor Yellow
                 $useDevDrive = $false
             }
         } catch {
@@ -2358,6 +2364,10 @@ if (`$wslList -match 'Ubuntu') {
         Write-Host "  ⚠ Could not detect physical disks. Skipping Dev Drive." -ForegroundColor Yellow
         $useDevDrive = $false
     }
+    #>
+    
+    # Set useDevDrive to false since dev drive logic is commented out
+    $useDevDrive = $false
 
     # --------------------------------------------------------------------------
     # STEP 3: SELECT DSC FILE
@@ -2497,7 +2507,7 @@ if (`$wslList -match 'Ubuntu') {
             if ($outputText) {
                 $outputLines = $outputText -split "`r?`n"
                 foreach ($line in $outputLines) {
-                    if ($line -match 'WinGetPackage\s+\[([^\]]+)\]' -or $line -match 'Processing.*\[([^\]]+)\]') {
+                    if ($line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D' -or $line -match 'Processing.*\x5B([^\x5D]+)\x5D') {
                         $packageId = $matches[1]
                         if ($packageId -and $packageId -notmatch '^\s*$') {
                             # Track package processing
@@ -2506,13 +2516,13 @@ if (`$wslList -match 'Ubuntu') {
                             }
                         }
                     }
-                    if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                    if ($line -match 'Successfully|installed|completed' -and $line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D') {
                         $packageId = $matches[1]
                         if ($packageId) {
                             $script:InstalledItems += "Dev Flows: $packageId"
                         }
                     }
-                    if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\[([^\]]+)\]') {
+                    if ($line -match 'Already\s+installed|Skipping|No\s+change' -and $line -match 'WinGetPackage\s+\x5B([^\x5D]+)\x5D') {
                         $packageId = $matches[1]
                         if ($packageId) {
                             $script:AlreadySetItems += "Dev Flows: $packageId"
