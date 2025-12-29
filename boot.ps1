@@ -1703,18 +1703,59 @@ if (`$wslList -match 'Ubuntu') {
             } else {
                 # Running in user context - can check directly
                 Write-Log "Running in user context - checking WSL distributions directly" -Level 'INFO' -Section "WSL Installation"
-                $wslListOutput = wsl --list 2>$null | Out-String
-                if ($wslListOutput) {
-                    Write-Host "Installed WSL distributions:"
-                    $wslListOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-Host "  $_" }
-                    # Check if Ubuntu is already installed (case-insensitive)
-                    if ($wslListOutput -match "Ubuntu" -or $wslListOutput -match "ubuntu") {
-                        $ubuntuInstalled = $true
-                        Write-Host "Ubuntu is already installed"
-                        $script:AlreadySetItems += "WSL Ubuntu"
+                try {
+                    # Use --quiet flag for cleaner output, or --verbose for more details
+                    $wslListOutput = wsl --list --quiet 2>$null | Out-String
+                    if (-not $wslListOutput) {
+                        # Fallback to regular list if --quiet doesn't work
+                        $wslListOutput = wsl --list 2>$null | Out-String
                     }
-                } else {
-                    Write-Host "No WSL distributions found or WSL not yet available"
+                    
+                    if ($wslListOutput) {
+                        Write-Host "Installed WSL distributions:"
+                        $wslListOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-Host "  $_" }
+                        
+                        # Check if Ubuntu is already installed - check for various Ubuntu distribution names
+                        # Ubuntu distributions can be named: Ubuntu, Ubuntu-22.04, Ubuntu-20.04, Ubuntu (Default), etc.
+                        $ubuntuPatterns = @(
+                            '^\s*Ubuntu\s*$',
+                            '^\s*Ubuntu\s*\(Default\)',
+                            '^\s*Ubuntu-\d+\.\d+',
+                            '^\s*Ubuntu\s+\d+\.\d+',
+                            '\bUbuntu\b'
+                        )
+                        
+                        $ubuntuFound = $false
+                        foreach ($pattern in $ubuntuPatterns) {
+                            if ($wslListOutput -match $pattern) {
+                                $ubuntuFound = $true
+                                break
+                            }
+                        }
+                        
+                        # Also check each line individually for more precise matching
+                        if (-not $ubuntuFound) {
+                            $wslLines = $wslListOutput -split "`n" | Where-Object { $_.Trim() -and $_ -notmatch '^Windows Subsystem for Linux' -and $_ -notmatch '^\s*NAME\s*STATE\s*VERSION' }
+                            foreach ($line in $wslLines) {
+                                $lineTrimmed = $line.Trim()
+                                if ($lineTrimmed -match '^Ubuntu' -or $lineTrimmed -match '\bUbuntu\b') {
+                                    $ubuntuFound = $true
+                                    break
+                                }
+                            }
+                        }
+                        
+                        if ($ubuntuFound) {
+                            $ubuntuInstalled = $true
+                            Write-Host "Ubuntu is already installed"
+                            $script:AlreadySetItems += "WSL Ubuntu"
+                        }
+                    } else {
+                        Write-Host "No WSL distributions found or WSL not yet available"
+                    }
+                } catch {
+                    Write-Log "Error checking WSL list: $_" -Level 'WARNING' -Section "WSL Installation"
+                    Write-Host "Could not check WSL distributions list"
                 }
             }
         } catch {
@@ -1734,21 +1775,49 @@ if (`$wslList -match 'Ubuntu') {
                 $script:WarningCount++
             } else {
                 # Running in user context - can install directly
-                Write-Host "WSL is installed but Ubuntu is not. Installing Ubuntu..."
-                Write-Log "Installing Ubuntu (running in user context)" -Level 'INFO' -Section "WSL Installation"
+                # Double-check Ubuntu is not installed before attempting installation
+                $finalCheck = $false
                 try {
-                    $ubuntuInstallOutput = wsl --install ubuntu 2>&1
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Host "Ubuntu installation initiated successfully"
-                        $script:InstalledItems += "WSL Ubuntu"
-                    } else {
-                        Write-Log "Ubuntu installation may require user interaction or a reboot" -Level 'WARNING' -Section "WSL Installation"
-                        Write-Host "Note: Ubuntu installation may require user interaction or a system restart"
+                    $finalWslList = wsl --list --quiet 2>$null | Out-String
+                    if (-not $finalWslList) {
+                        $finalWslList = wsl --list 2>$null | Out-String
+                    }
+                    if ($finalWslList -and ($finalWslList -match '\bUbuntu\b')) {
+                        $finalCheck = $true
+                        Write-Host "Ubuntu is already installed (verified before installation attempt)"
+                        $script:AlreadySetItems += "WSL Ubuntu"
                     }
                 } catch {
-                    $script:WarningCount++
-                    Write-Log "Failed to install Ubuntu: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
-                    Write-Host "You can install Ubuntu manually using: wsl --install ubuntu"
+                    # If check fails, proceed with installation attempt
+                }
+                
+                if (-not $finalCheck) {
+                    Write-Host "WSL is installed but Ubuntu is not. Installing Ubuntu..."
+                    Write-Log "Installing Ubuntu (running in user context)" -Level 'INFO' -Section "WSL Installation"
+                    try {
+                        $ubuntuInstallOutput = wsl --install ubuntu 2>&1 | Out-String
+                        # Check if the output indicates Ubuntu is already installed
+                        if ($ubuntuInstallOutput -match 'already installed' -or $ubuntuInstallOutput -match 'is already a valid distribution') {
+                            Write-Host "Ubuntu is already installed (detected during installation attempt)"
+                            $script:AlreadySetItems += "WSL Ubuntu"
+                        } elseif ($LASTEXITCODE -eq 0) {
+                            Write-Host "Ubuntu installation initiated successfully"
+                            $script:InstalledItems += "WSL Ubuntu"
+                        } else {
+                            # Check if error is because Ubuntu is already installed
+                            if ($ubuntuInstallOutput -match 'already' -or $ubuntuInstallOutput -match 'exists') {
+                                Write-Host "Ubuntu appears to be already installed"
+                                $script:AlreadySetItems += "WSL Ubuntu"
+                            } else {
+                                Write-Log "Ubuntu installation may require user interaction or a reboot" -Level 'WARNING' -Section "WSL Installation"
+                                Write-Host "Note: Ubuntu installation may require user interaction or a system restart"
+                            }
+                        }
+                    } catch {
+                        $script:WarningCount++
+                        Write-Log "Failed to install Ubuntu: $_" -Level 'WARNING' -Section "WSL Installation" -Exception $_
+                        Write-Host "You can install Ubuntu manually using: wsl --install ubuntu"
+                    }
                 }
             }
         }
