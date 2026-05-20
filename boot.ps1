@@ -268,7 +268,7 @@ function Clear-MDMFailedRegistryAttempts {
                             if ($keyProps.PSObject.Properties.Name -contains "State" -and $keyProps.State -eq "Failed") {
                                 $shouldRemove = $true
                             }
-                            if ($keyProps.PSObject.Properties.Name -contains "LastError" -and $keyProps.LastError -ne $null -and $keyProps.LastError -ne 0) {
+                            if ($keyProps.PSObject.Properties.Name -contains "LastError" -and $null -ne $keyProps.LastError -and $keyProps.LastError -ne 0) {
                                 $shouldRemove = $true
                             }
                         }
@@ -671,13 +671,13 @@ function Invoke-WinGetCommand {
                         $tempError = [System.IO.Path]::GetTempFileName()
                         $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
                         $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-                        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                        $stderr = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
                         Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
                         Remove-Item $tempError -Force -ErrorAction SilentlyContinue
                         return @{
                             ExitCode = $process.ExitCode
                             Output = $output
-                            Error = $error
+                            Error = $stderr
                         }
                     } else {
                         $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
@@ -707,13 +707,13 @@ function Invoke-WinGetCommand {
         $tempError = [System.IO.Path]::GetTempFileName()
         $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
         $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
         Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
         Remove-Item $tempError -Force -ErrorAction SilentlyContinue
         return @{
             ExitCode = $process.ExitCode
             Output = $output
-            Error = $error
+            Error = $stderr
         }
     } else {
         $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
@@ -1228,10 +1228,11 @@ try {
                 End-Section "Windows HWID Activation"
                 # Continue with rest of script - don't return
             } else {
-                # Check internet connection
+                # Check internet connection (Google public DNS used as a well-known reachable target)
+                $connectivityProbeHost = "8.8.8.8"
                 $internetConnected = $false
                 try {
-                    $testConnection = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction Stop
+                    $testConnection = Test-Connection -ComputerName $connectivityProbeHost -Count 1 -Quiet -ErrorAction Stop
                     if ($testConnection) {
                         $internetConnected = $true
                     }
@@ -1239,7 +1240,7 @@ try {
                     # Try alternative method
                     try {
                         $webClient = New-Object System.Net.NetworkInformation.Ping
-                        $result = $webClient.Send("8.8.8.8", 1000)
+                        $result = $webClient.Send($connectivityProbeHost, 1000)
                         $internetConnected = ($result.Status -eq 'Success')
                     } catch {
                         $internetConnected = $false
