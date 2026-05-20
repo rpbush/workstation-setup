@@ -1,0 +1,43 @@
+name: Lint
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  lint:
+    name: PSScriptAnalyzer + DSC YAML
+    # PSScriptAnalyzer is more reliable on the Windows runner than ubuntu-latest pwsh.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Lint boot.ps1
+        shell: pwsh
+        run: |
+          Invoke-ScriptAnalyzer -Path boot.ps1 -Settings PSScriptAnalyzerSettings.psd1 -EnableExit
+
+      - name: Validate DSC YAML files
+        shell: pwsh
+        run: |
+          # Use Python + PyYAML (preinstalled on windows-latest) for YAML validation.
+          # Avoids an extra PSGallery dependency (powershell-yaml) and produces a
+          # clean non-zero exit on parse failure.
+          $files = @('rpbush.dev.dsc.yml', 'rpbush.office.dsc.yml')
+          foreach ($f in $files) {
+              Write-Host "Validating $f"
+              python -c "import yaml, sys; yaml.safe_load(open(sys.argv[1], encoding='utf-8'))" $f
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "YAML validation failed for $f"
+                  exit 1
+              }
+          }
