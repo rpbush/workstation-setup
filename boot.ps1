@@ -1583,36 +1583,114 @@ Write-Log "PHASE 2: Main Installation & Configuration" -Level 'SECTION_START'
 Write-Log "========================================" -Level 'INFO'
 
 # Admin section now
-   # ---------------
     # ---------------
-    # Configure File Explorer to show hidden files and folders
-    Write-Host "Start: Configuring File Explorer settings"
+    # Windows Settings: a single section that applies all dependency-free
+    # OS-level tweaks (registry / powercfg). Settings with prerequisites
+    # (e.g., setting PowerShell 7 as the default Windows Terminal profile)
+    # stay near their dependency further down.
+    Write-Host "Start: Applying Windows settings"
+    Start-Section "Windows Settings"
     try {
-        Start-Section "File Explorer Configuration"
-        $explorerKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-        
-        # Ensure the registry path exists
-        if (-not (Test-Path $explorerKey)) {
-            New-Item -Path $explorerKey -Force | Out-Null
+        # --- File Explorer: show hidden files / folders / drives -----------
+        try {
+            $explorerKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            if (-not (Test-Path $explorerKey)) {
+                New-Item -Path $explorerKey -Force | Out-Null
+            }
+            Set-ItemProperty -Path $explorerKey -Name "Hidden" -Value 2 -Type DWORD -Force
+            Write-Log "File Explorer configured to show hidden files, folders, and drives" -Level 'SUCCESS' -Section "Windows Settings"
+            $script:SettingsApplied += "File Explorer: Show hidden files/folders"
+
+            # Restart explorer.exe to apply the registry changes
+            Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Process "explorer.exe"
+        } catch {
+            $script:ErrorCount++
+            Write-Log "Failed to configure File Explorer settings" -Level 'ERROR' -Section "Windows Settings" -Exception $_
         }
-        
-        # Set Hidden to 2 (Show hidden files, folders, and drives)
-        Set-ItemProperty -Path $explorerKey -Name "Hidden" -Value 2 -Type DWORD -Force
-        Write-Log "File Explorer configured to show hidden files, folders, and drives" -Level 'SUCCESS' -Section "File Explorer Configuration"
-        $script:SettingsApplied += "File Explorer: Show hidden files/folders"
-        
-        # Refresh File Explorer to apply changes
-        # This will restart explorer.exe to apply the registry changes
-        Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        Start-Process "explorer.exe"
-        
-        End-Section "File Explorer Configuration"
-    } catch {
-        $script:ErrorCount++
-        Write-Log "Failed to configure File Explorer settings" -Level 'ERROR' -Section "File Explorer Configuration" -Exception $_
+
+        # --- Power profile: Ultimate Performance, falling back to High ----
+        try {
+            $powerSchemes = powercfg /list 2>$null
+
+            function Get-PowerSchemeGuid {
+                param([string]$SchemeName)
+                # Parse `powercfg /list` output: "Power Scheme GUID: <guid> (<Name>)"
+                $lines = $powerSchemes -split "`n"
+                foreach ($line in $lines) {
+                    if ($line -match "($([regex]::Escape($SchemeName)))" -and $line -match "([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})") {
+                        return $matches[2]
+                    }
+                }
+                return $null
+            }
+
+            $ultimatePerfGuid = Get-PowerSchemeGuid "Ultimate Performance"
+            if ($ultimatePerfGuid) {
+                powercfg /setactive $ultimatePerfGuid 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "Power profile set to Ultimate Performance" -Level 'SUCCESS' -Section "Windows Settings"
+                    $script:SettingsApplied += "Power Profile: Ultimate Performance"
+                } else {
+                    Write-Warning "Failed to set Ultimate Performance profile"
+                }
+            } else {
+                $highPerfGuid = Get-PowerSchemeGuid "High Performance"
+                if ($highPerfGuid) {
+                    powercfg /setactive $highPerfGuid 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "Power profile set to High Performance" -Level 'SUCCESS' -Section "Windows Settings"
+                        $script:SettingsApplied += "Power Profile: High Performance"
+                    } else {
+                        Write-Warning "Failed to set High Performance profile"
+                    }
+                } else {
+                    # Last resort: standard GUIDs (consistent across Windows installs)
+                    $standardUltimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+                    $standardHighGuid     = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+                    if ($powerSchemes -match $standardUltimateGuid) {
+                        powercfg /setactive $standardUltimateGuid 2>$null
+                        Write-Log "Power profile set to Ultimate Performance (via standard GUID)" -Level 'SUCCESS' -Section "Windows Settings"
+                        $script:SettingsApplied += "Power Profile: Ultimate Performance"
+                    } elseif ($powerSchemes -match $standardHighGuid) {
+                        powercfg /setactive $standardHighGuid 2>$null
+                        Write-Log "Power profile set to High Performance (via standard GUID)" -Level 'SUCCESS' -Section "Windows Settings"
+                        $script:SettingsApplied += "Power Profile: High Performance"
+                    } else {
+                        Write-Warning "Performance power profile not found. Available profiles:"
+                        $powerSchemes | ForEach-Object { Write-Host "  $_" }
+                    }
+                }
+            }
+        } catch {
+            Write-Warning "Failed to set power profile: $_"
+        }
+
+        # --- System tray: always show all icons ----------------------------
+        try {
+            # Clear the hidden-icons cache so the new setting takes effect.
+            $trayNotifyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TrayNotify"
+            if (Test-Path $trayNotifyPath) {
+                Remove-ItemProperty -Path $trayNotifyPath -Name "IconStreams"     -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $trayNotifyPath -Name "PastIconsStream" -ErrorAction SilentlyContinue
+            }
+
+            $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+            if (-not (Test-Path $explorerPath)) {
+                New-Item -Path $explorerPath -Force | Out-Null
+            }
+            # EnableAutoTray: 0 = show all icons, 1 = hide some
+            Set-ItemProperty -Path $explorerPath -Name "EnableAutoTray" -Value 0 -Type DWORD -Force
+            Write-Log "System tray configured to show all icons" -Level 'SUCCESS' -Section "Windows Settings"
+            $script:SettingsApplied += "System Tray: Show all icons"
+        } catch {
+            Write-Warning "Failed to configure system tray: $_"
+        }
+    } finally {
+        End-Section "Windows Settings"
     }
-    Write-Host "Done: Configuring File Explorer settings"
+    Write-Host "Done: Applying Windows settings"
     # ---------------
     # Adding Microsoft Account (MSA) sign-in
     # Note: Windows does not provide a direct command-line method to add a Microsoft account
@@ -1940,106 +2018,9 @@ if (`$wslList -match 'Ubuntu') {
     }
     Write-Host "Done: Installing Windows Features"
     # ---------------
-    # Setting power profile to Performance/Ultimate Performance
-    Write-Host "Start: Setting power profile to Performance"
-    try {
-        # Get all power schemes
-        $powerSchemes = powercfg /list 2>$null
-        
-        # Function to find power scheme GUID by name
-        function Get-PowerSchemeGuid {
-            param([string]$SchemeName)
-            
-            # Parse powercfg /list output to find scheme by name
-            # Format: "Power Scheme GUID: Name (GUID)"
-            $lines = $powerSchemes -split "`n"
-            foreach ($line in $lines) {
-                if ($line -match "($([regex]::Escape($SchemeName)))" -and $line -match "([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})") {
-                    return $matches[2]  # Return the GUID
-                }
-            }
-            return $null
-        }
-        
-        # Try to find Ultimate Performance first (highest performance)
-        $ultimatePerfGuid = Get-PowerSchemeGuid "Ultimate Performance"
-        if ($ultimatePerfGuid) {
-            powercfg /setactive $ultimatePerfGuid 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Power profile set to Ultimate Performance"
-            } else {
-                Write-Warning "Failed to set Ultimate Performance profile"
-            }
-        } else {
-            # Fall back to High Performance
-            $highPerfGuid = Get-PowerSchemeGuid "High Performance"
-            if ($highPerfGuid) {
-                powercfg /setactive $highPerfGuid 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "Power profile set to High Performance"
-                } else {
-                    Write-Warning "Failed to set High Performance profile"
-                }
-            } else {
-                # Last resort: try standard GUIDs (these are consistent across Windows)
-                Write-Host "Could not find performance profile by name, trying standard GUIDs..."
-                $standardUltimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-                $standardHighGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
-                
-                if ($powerSchemes -match $standardUltimateGuid) {
-                    powercfg /setactive $standardUltimateGuid 2>$null
-                    Write-Host "Power profile set to Ultimate Performance (via standard GUID)"
-                    $script:SettingsApplied += "Power Profile: Ultimate Performance"
-                } elseif ($powerSchemes -match $standardHighGuid) {
-                    powercfg /setactive $standardHighGuid 2>$null
-                    Write-Host "Power profile set to High Performance (via standard GUID)"
-                } else {
-                    Write-Warning "Performance power profile not found. Available profiles:"
-                    $powerSchemes | ForEach-Object { Write-Host "  $_" }
-                }
-            }
-        }
-    } catch {
-        Write-Warning "Failed to set power profile: $_"
-    }
-    Write-Host "Done: Setting power profile to Performance"
-    # ---------------
-    # Setting system tray to show all icons
-    Write-Host "Start: Setting system tray to show all icons"
-    try {
-        # Clear the hidden icons list in the system tray
-        $trayNotifyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TrayNotify"
-        if (Test-Path $trayNotifyPath) {
-            # Remove the IconStreams and PastIconsStream values which contain hidden icon data
-            Remove-ItemProperty -Path $trayNotifyPath -Name "IconStreams" -ErrorAction SilentlyContinue
-            Remove-ItemProperty -Path $trayNotifyPath -Name "PastIconsStream" -ErrorAction SilentlyContinue
-            Write-Host "Cleared system tray hidden icons list"
-        }
-        
-        # Set registry to always show all icons (Windows 10/11)
-        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-        if (-not (Test-Path $explorerPath)) {
-            New-Item -Path $explorerPath -Force | Out-Null
-        }
-        
-        # Enable "Always show all icons in the notification area" setting
-        # This is controlled by the EnableAutoTray DWORD value (0 = show all, 1 = hide some)
-        Set-ItemProperty -Path $explorerPath -Name "EnableAutoTray" -Value 0 -Type DWORD -Force
-        Write-Host "System tray configured to show all icons"
-        $script:SettingsApplied += "System Tray: Show all icons"
-        
-        # Restart Explorer to apply changes (optional, but ensures immediate effect)
-        # Get-Process explorer | Stop-Process -Force
-        # Start-Sleep -Seconds 2
-        # Start-Process explorer.exe
-        
-    } catch {
-        Write-Warning "Failed to configure system tray: $_"
-    }
-    Write-Host "Done: Setting system tray to show all icons"
-    # ---------------
-    
-    # Network drive mapping removed - will be handled via Group Policy instead
+    # Power profile + system tray + File Explorer settings are applied earlier
+    # in the "Windows Settings" section near the top of Phase 2.
+    # Network drive mapping is handled via Group Policy, not this script.
     # ---------------
     # Installing Windows Terminal
     # Reference: https://learn.microsoft.com/en-us/windows/terminal/
