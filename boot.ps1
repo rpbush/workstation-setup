@@ -20,13 +20,24 @@
 
 # 1. PARAMETERS & PREAMBLE
 param (
-    [switch]$ResumeAfterReboot  # This flag tells the script we just rebooted
+    [switch]$ResumeAfterReboot,            # This flag tells the script we just rebooted
+    [switch]$Unattended,                   # Skip interactive prompts (MSA sign-in, post-NFS reboot confirmation)
+    [string]$RepoOwner = "rpbush",         # GitHub owner to download DSC YAMLs from (fork-friendly)
+    [string]$RepoName  = "workstation-setup",
+    [string]$RepoBranch = "main"
 )
+
+# Strict mode: catches uninitialized variable references. Kept at Version 1.0
+# rather than Latest because the script relies on missing-property checks via
+# -ErrorAction SilentlyContinue and would break under Version 3+ until each
+# call site is hardened. Raise this once analyzer findings are clean.
+Set-StrictMode -Version 1.0
 
 $mypath = $MyInvocation.MyCommand.Path
 Write-Output "Path of the script: $mypath"
 Write-Output "Args for script: $Args"
 Write-Output "ResumeAfterReboot: $ResumeAfterReboot"
+Write-Output "Unattended: $Unattended"
 
 # 2. ELEVATION STRATEGY
 # IMPORTANT: This script runs in USER context by default to support WinGet
@@ -257,7 +268,7 @@ function Clear-MDMFailedRegistryAttempts {
                             if ($keyProps.PSObject.Properties.Name -contains "State" -and $keyProps.State -eq "Failed") {
                                 $shouldRemove = $true
                             }
-                            if ($keyProps.PSObject.Properties.Name -contains "LastError" -and $keyProps.LastError -ne $null -and $keyProps.LastError -ne 0) {
+                            if ($keyProps.PSObject.Properties.Name -contains "LastError" -and $null -ne $keyProps.LastError -and $keyProps.LastError -ne 0) {
                                 $shouldRemove = $true
                             }
                         }
@@ -495,6 +506,19 @@ function Test-AppxPackageInstalled {
     }
 }
 
+# Helper function to check if the Microsoft Store is available on this system.
+# Returns $false on Windows Sandbox, LTSC, Server, and other editions that ship
+# without it. Use this to gate any `ms-windows-store://` launch — those URLs
+# silently hang if the Store isn't installed.
+function Test-MicrosoftStoreAvailable {
+    try {
+        $store = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
+        return ($null -ne $store)
+    } catch {
+        return $false
+    }
+}
+
 # Helper function to check if Windows is already activated
 function Test-WindowsActivated {
     try {
@@ -647,13 +671,13 @@ function Invoke-WinGetCommand {
                         $tempError = [System.IO.Path]::GetTempFileName()
                         $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
                         $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-                        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+                        $stderr = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
                         Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
                         Remove-Item $tempError -Force -ErrorAction SilentlyContinue
                         return @{
                             ExitCode = $process.ExitCode
                             Output = $output
-                            Error = $error
+                            Error = $stderr
                         }
                     } else {
                         $process = Start-Process -FilePath $wingetExe.FullName -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
@@ -683,13 +707,13 @@ function Invoke-WinGetCommand {
         $tempError = [System.IO.Path]::GetTempFileName()
         $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOutput -RedirectStandardError $tempError -ErrorAction SilentlyContinue
         $output = Get-Content $tempOutput -Raw -ErrorAction SilentlyContinue
-        $error = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content $tempError -Raw -ErrorAction SilentlyContinue
         Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue
         Remove-Item $tempError -Force -ErrorAction SilentlyContinue
         return @{
             ExitCode = $process.ExitCode
             Output = $output
-            Error = $error
+            Error = $stderr
         }
     } else {
         $process = Start-Process -FilePath "winget.exe" -ArgumentList $Arguments -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
@@ -1138,12 +1162,18 @@ try {
         Write-Warning "Could not find or install NFS Client feature. NFS drive mapping may fail."
     }
     
-    # Prompt for reboot if NFS was just installed
+    # Prompt for reboot if NFS was just installed.
+    # In -Unattended mode (or if Phase 1 already armed the RunOnce path), auto-reboot.
     if ($nfsNeedsReboot) {
         Write-Host ""
         Write-Host "NFS Client feature requires a system restart to function properly." -ForegroundColor Yellow
-        Write-Host "Please restart your computer now, then run this script again to continue." -ForegroundColor Yellow
         Write-Host ""
+        if ($Unattended) {
+            Write-Host "Unattended mode: restarting in 10 seconds... Press Ctrl+C to cancel" -ForegroundColor Yellow
+            Start-Sleep -Seconds 10
+            Restart-Computer -Force
+            exit
+        }
         $rebootChoice = Read-Host "Would you like to restart now? (Y/N)"
         if ($rebootChoice -eq 'Y' -or $rebootChoice -eq 'y') {
             Write-Host "Restarting computer in 10 seconds... Press Ctrl+C to cancel"
@@ -1198,10 +1228,11 @@ try {
                 End-Section "Windows HWID Activation"
                 # Continue with rest of script - don't return
             } else {
-                # Check internet connection
+                # Check internet connection (Google public DNS used as a well-known reachable target)
+                $connectivityProbeHost = "8.8.8.8"
                 $internetConnected = $false
                 try {
-                    $testConnection = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction Stop
+                    $testConnection = Test-Connection -ComputerName $connectivityProbeHost -Count 1 -Quiet -ErrorAction Stop
                     if ($testConnection) {
                         $internetConnected = $true
                     }
@@ -1209,7 +1240,7 @@ try {
                     # Try alternative method
                     try {
                         $webClient = New-Object System.Net.NetworkInformation.Ping
-                        $result = $webClient.Send("8.8.8.8", 1000)
+                        $result = $webClient.Send($connectivityProbeHost, 1000)
                         $internetConnected = ($result.Status -eq 'Success')
                     } catch {
                         $internetConnected = $false
@@ -1385,8 +1416,11 @@ $dscOffice = Join-Path $env:TEMP "rpbush.office.dsc.yml"
 $dscAdminLocal = Join-Path $scriptDir "rpbush.dev.dsc.yml"
 $dscOfficeLocal = Join-Path $scriptDir "rpbush.office.dsc.yml"
 
-# GitHub repository for DSC files (use workstation-setup repo which contains the files)
-$dscUri = "https://raw.githubusercontent.com/rpbush/workstation-setup/main/"
+# GitHub repository for DSC files. Derived from -RepoOwner / -RepoName / -RepoBranch
+# so a fork can override without editing the script. The DSC filenames remain
+# `rpbush.*.dsc.yml` because they're the owner's personal configs; a fork should
+# either keep the names or rename in lockstep here.
+$dscUri = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$RepoBranch/"
 
 # Use just the filename for URIs (not the full temp path)
 $dscOfficeUri = $dscUri + "rpbush.office.dsc.yml"
@@ -1591,19 +1625,23 @@ Write-Log "========================================" -Level 'INFO'
         Write-Host "You will need to complete the sign-in process in the Settings window." -ForegroundColor Yellow
         Write-Host ""
         
-        # Open Windows Settings to the Accounts page for adding a Microsoft account
-        # This opens the "Add a Microsoft account" page
-        Start-Process "ms-settings:emailandaccounts" -ErrorAction Stop
-        
-        Write-Host "Instructions:" -ForegroundColor Cyan
-        Write-Host "1. In the Settings window, click 'Add a Microsoft account' or 'Add account'"
-        Write-Host "2. Enter your Microsoft Account email address"
-        Write-Host "3. Enter your password and follow the authentication prompts"
-        Write-Host "4. Complete any additional verification steps (if required)"
-        Write-Host ""
-        Write-Host "Press any key after you've completed the Microsoft Account sign-in (or to skip)..."
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        Write-Host ""
+        if ($Unattended) {
+            Write-Host "Unattended mode: skipping interactive Microsoft Account sign-in." -ForegroundColor Yellow
+            Write-Host "Sign in later via Settings > Accounts > Email & accounts."
+        } else {
+            # Open Windows Settings to the Accounts page for adding a Microsoft account
+            Start-Process "ms-settings:emailandaccounts" -ErrorAction Stop
+
+            Write-Host "Instructions:" -ForegroundColor Cyan
+            Write-Host "1. In the Settings window, click 'Add a Microsoft account' or 'Add account'"
+            Write-Host "2. Enter your Microsoft Account email address"
+            Write-Host "3. Enter your password and follow the authentication prompts"
+            Write-Host "4. Complete any additional verification steps (if required)"
+            Write-Host ""
+            Write-Host "Press any key after you've completed the Microsoft Account sign-in (or to skip)..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            Write-Host ""
+        }
     } catch {
         Write-Warning "Failed to open account settings: $_"
         Write-Host "You can manually add your Microsoft Account from Settings > Accounts > Email & accounts"
@@ -2027,18 +2065,16 @@ if (`$wslList -match 'Ubuntu') {
                 
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "  ✓ Windows Terminal installed successfully" -ForegroundColor Green
-                } else {
-                    Write-Log "WinGet installation may have failed. Trying alternative method..." -Level 'WARNING' -Section "Windows Terminal Installation"
-                    # Fallback: Try installing via Microsoft Store
+                } elseif (Test-MicrosoftStoreAvailable) {
+                    Write-Log "WinGet installation may have failed. Trying Microsoft Store fallback..." -Level 'WARNING' -Section "Windows Terminal Installation"
                     try {
                         Start-Process "ms-windows-store://pdp/?ProductId=9N0DX20HK701" -ErrorAction Stop
                         Start-Sleep -Seconds 2  # Give Store time to open
-                        
+
                         $installed = Wait-ForStoreInstallation -AppName "Windows Terminal" -PackageName "Microsoft.WindowsTerminal"
                         if ($installed) {
-                        # Check if it got installed
-                        $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
-                        if ($wtCheck) {
+                            $wtCheck = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
+                            if ($wtCheck) {
                                 Write-Log "Windows Terminal installed via Microsoft Store" -Level 'SUCCESS' -Section "Windows Terminal Installation"
                             }
                         }
@@ -2046,6 +2082,9 @@ if (`$wslList -match 'Ubuntu') {
                         $script:ErrorCount++
                         Write-Log "Could not open Microsoft Store for Windows Terminal" -Level 'ERROR' -Section "Windows Terminal Installation" -Exception $_
                     }
+                } else {
+                    $script:WarningCount++
+                    Write-Log "WinGet install of Windows Terminal failed and Microsoft Store is unavailable on this edition. Skipping fallback." -Level 'WARNING' -Section "Windows Terminal Installation"
                 }
             } catch {
                 Write-Warning "Failed to install Windows Terminal via WinGet: $_"
@@ -2419,117 +2458,18 @@ if (`$wslList -match 'Ubuntu') {
     }
 
     # --------------------------------------------------------------------------
-    # STEP 2: DEV DRIVE PARTITIONING LOGIC (Single Drive Only)
+    # STEP 2: SELECT DSC FILE
     # --------------------------------------------------------------------------
-    # COMMENTED OUT - To be worked on later
-    <#
-    Write-Host "  → Checking disk configuration for Dev Drive..." -ForegroundColor Gray
-    
-    $useDevDrive = $false
-    $physicalDisks = Get-PhysicalDisk | Where-Object { $_.OperationalStatus -eq 'OK' -and $_.MediaType -ne 'Unspecified' }
-    
-    if ($physicalDisks.Count -eq 1) {
-        Write-Host "  ✓ Single physical drive detected. Checking space for partition shrink..." -ForegroundColor Green
-        
-        # Get the partition info for C:
-        try {
-            $cPartition = Get-Partition -DriveLetter C -ErrorAction Stop
-            $cDrive = Get-PSDrive -Name C -ErrorAction Stop
-            $shrinkSizeGB = 75
-            $shrinkSizeBytes = $shrinkSizeGB * 1GB
-            $minFreeSpaceRequired = $shrinkSizeBytes + (10GB) # Require 75GB + 10GB buffer
-            
-            if ($cDrive.Free -gt $minFreeSpaceRequired) {
-                Write-Host "  → Shrinking C: drive by 75GB to create Dev Drive..." -ForegroundColor Yellow
-                Write-Log "Shrinking C: partition to create 75GB Dev Drive" -Level 'INFO' -Section "Dev Flows Installation"
-                
-                try {
-                    # 1. Resize C: Partition
-                    # Check supported size to handle unmovable files
-                    $supportedSize = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
-                    $currentSize = $cPartition.Size
-                    $targetSize = $currentSize - $shrinkSizeBytes
-                    
-                    # Ensure we don't try to shrink more than Windows allows at this moment
-                    if ($targetSize -lt $supportedSize.SizeMin) {
-                        $targetSize = $supportedSize.SizeMin
-                        $actualShrinkGB = [math]::Round(($currentSize - $targetSize) / 1GB, 2)
-                        Write-Log "C: drive has unmovable files. Shrinking to minimum possible size ($actualShrinkGB GB) instead of full 75GB." -Level 'WARNING' -Section "Dev Flows Installation"
-                        Write-Host "  ⚠ C: drive has unmovable files. Shrinking by $actualShrinkGB GB instead of 75GB." -ForegroundColor Yellow
-                    }
-                    
-                    Resize-Partition -DriveLetter C -Size $targetSize -ErrorAction Stop
-                    $actualFreedGB = [math]::Round(($currentSize - $targetSize) / 1GB, 2)
-                    Write-Log "C: partition resized successfully (freed $actualFreedGB GB)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                    
-                    # 2. Create Dev Drive in new unallocated space
-                    Write-Host "  → Creating Dev Drive partition..." -ForegroundColor Yellow
-                    # We find the disk C: is on
-                    $diskNumber = $cPartition.DiskNumber
-                    
-                    # Create new partition using maximum available space (which is the 75GB we just freed)
-                    $newPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -DriveLetter D -ErrorAction Stop
-                    Write-Log "New partition created on Disk $diskNumber (Drive D:)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                    
-                    # 3. Format as Dev Drive (ReFS)
-                    # Note: -DevDrive parameter optimizes it automatically
-                    Write-Host "  → Formatting as Dev Drive (ReFS)..." -ForegroundColor Yellow
-                    Format-Volume -Partition $newPartition -DevDrive -FileSystem ReFS -NewFileSystemLabel "Dev Drive" -Confirm:$false -Force -ErrorAction Stop
-                    
-                    Write-Host "  ✓ Dev Drive created successfully on D:" -ForegroundColor Green
-                    Write-Log "Dev Drive created successfully on D: (ReFS format)" -Level 'SUCCESS' -Section "Dev Flows Installation"
-                    $useDevDrive = $true
-                    
-                } catch {
-                    Write-Log "Failed to resize partition or create Dev Drive: $_" -Level 'ERROR' -Section "Dev Flows Installation" -Exception $_
-                    Write-Host "  ✗ Failed to create Dev Drive partition. Skipping." -ForegroundColor Red
-                    $script:ErrorCount++
-                    $useDevDrive = $false
-                }
-            } else {
-                $freeSpaceGB = [math]::Round($cDrive.Free / 1GB, 2)
-                Write-Log "Insufficient free space on C: to create Dev Drive (Free: $($freeSpaceGB) GB, Required: 85 GB)" -Level 'WARNING' -Section "Dev Flows Installation"
-                Write-Host "  ⚠ Insufficient space on C: to shrink ($($freeSpaceGB) GB free, 85 GB required). Skipping Dev Drive." -ForegroundColor Yellow
-                $useDevDrive = $false
-            }
-        } catch {
-            Write-Log "Could not access C: partition or drive information" -Level 'WARNING' -Section "Dev Flows Installation" -Exception $_
-            Write-Host "  ⚠ Could not check C: drive. Skipping Dev Drive." -ForegroundColor Yellow
-            $useDevDrive = $false
-        }
-
-    } elseif ($physicalDisks.Count -gt 1) {
-        Write-Log "Multiple drives detected ($($physicalDisks.Count)). Skipping new partition creation as requested." -Level 'INFO' -Section "Dev Flows Installation"
-        Write-Host "  → Multiple drives detected ($($physicalDisks.Count)). Skipping partition creation." -ForegroundColor Yellow
-        $useDevDrive = $false
-        
-        # NOTE: If you wanted to use the second drive AS the Dev Drive (without re-partitioning),
-        # you could enable this logic here. But per your request, we do NOT create new partitions.
-    } else {
-        Write-Log "No physical disks detected or unable to enumerate disks" -Level 'WARNING' -Section "Dev Flows Installation"
-        Write-Host "  ⚠ Could not detect physical disks. Skipping Dev Drive." -ForegroundColor Yellow
-        $useDevDrive = $false
-    }
-    #>
-    
-    # Set useDevDrive to false since dev drive logic is commented out
-    $useDevDrive = $false
-
-    # --------------------------------------------------------------------------
-    # STEP 3: SELECT DSC FILE
-    # --------------------------------------------------------------------------
-    # Always use the main dev.dsc.yml file (it exists in the repository)
-    # The Dev Drive resource in the DSC will only succeed if conditions are met
-    # If Dev Drive creation fails, our auto-fallback logic will handle it
+    # Dev Drive creation is delegated to the StorageDsc 'Disk' resource declared
+    # in rpbush.dev.dsc.yml — it formats Z: as a 75GB ReFS Dev Drive on disk 0.
+    # If conditions aren't met (already-formatted disk, insufficient space, Home
+    # edition, etc.) the resource fails gracefully and the rest of the DSC still
+    # applies. No imperative partitioning logic in PowerShell.
     $dscFileToUse = $dscAdmin
     $dscFileToUseLocal = $dscAdminLocal
     $dscFileToUseUri = $dscAdminUri
-    
-    if ($useDevDrive) {
-        Write-Log "Using Dev Flows DSC file (Dev Drive will be created): $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
-    } else {
-        Write-Log "Using Dev Flows DSC file (Dev Drive resource may fail if not available): $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
-    }
+
+    Write-Log "Using Dev Flows DSC file: $dscFileToUse" -Level 'INFO' -Section "Dev Flows Installation"
     
     # Download or use local file
     if (Test-Path $dscFileToUseLocal) {
@@ -2938,18 +2878,7 @@ if (`$wslList -match 'Ubuntu') {
         }
         
         if ($wingetAvailable) {
-            # Check if Microsoft Store is available
-            $storeAvailable = $false
-            try {
-                $storeTest = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
-                if ($storeTest) {
-                    $storeAvailable = $true
-                }
-            } catch {
-                # Store not available
-            }
-            
-            if ($storeAvailable) {
+            if (Test-MicrosoftStoreAvailable) {
                 # Check if we already have the Store version
                 $appInstaller = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -ErrorAction SilentlyContinue
                 if ($appInstaller) {

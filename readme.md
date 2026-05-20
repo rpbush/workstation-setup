@@ -1,98 +1,96 @@
-# rpbush WinGet Configure list
+# rpbush workstation-setup
 
-This is my winget configure script to set up a new computer.  Still work in progress.  There will need to be a hybrid of Needing admin to run.  Parts have been validated on an Azure VM but needs more validation.
+Opinionated Windows 11 bootstrap. One PowerShell command on a fresh machine; ~30 minutes later you have a working dev workstation. Still work in progress — validated on Azure VMs and personal hardware, but treat it as "trusted-but-verify."
 
-Most everything in the dsc.yml should work.
+## Quick start
 
-## Assumptions:
-
-- New computer with Windows 11 that can boot a dev drive.
-- C:\ can be shrunk by 75 gigs to create dev drive. 
-- D:\ will be dev drive
-
-## Quick Start (Run from GitHub)
-
-Run this command in PowerShell (as Administrator) to download and execute the setup script directly:
+Open PowerShell as a **non-elevated user** (WinGet doesn't work elevated — the script will elevate per-command via UAC when it needs to):
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null; Set-Location "C:\temp"; $scriptPath = "C:\temp\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
-```
-
-**One-liner (copy and paste):**
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null; Set-Location "C:\temp"; $scriptPath = "C:\temp\boot.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile $scriptPath; & $scriptPath
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force; New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null; Set-Location "C:\temp"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile "C:\temp\boot.ps1"; & "C:\temp\boot.ps1"
 ```
 
 ### Prerequisites
 
-- Windows 11 (recommended) or Windows 10
-- Administrator privileges
-- Internet connection
+- Windows 11 (Windows 10 mostly works; NFS Client and Dev Drive bits are Win11-only)
+- Pro / Enterprise / Education edition (NFS Client is gated off on Home)
 - PowerShell 5.1 or later
+- Internet connection
+- A logged-in user account (WinGet is per-user; don't run from SYSTEM)
 
-### Important Notes
+### What it does
 
-- The script will automatically download required DSC configuration files from GitHub (currently configured to download from `https://raw.githubusercontent.com/rpbush/New_Computer_Setup/main/`)
-- **Windows Activation**: The script will automatically download `MAS_AIO.cmd` from the GitHub repository if it's not found locally. Windows activation will be skipped with a warning if the download fails.
-- The script will prompt for administrator privileges when needed
-- **Network Drives**: The script maps N: (NFS:/media) and S: (\\FS-1\Storage). Modify these in `boot.ps1` if your network setup differs.
-- **All Required Files**: The script automatically downloads all required files from GitHub, so you only need to run the one-liner command above.
+**Phase 1** — Installs Windows features that may need a reboot (currently just NFS Client). If a reboot fires, the script copies itself to `C:\ProgramData\WorkstationSetup\`, registers a RunOnce key, reboots, and resumes automatically.
 
-### Alternative: Download and Run Locally
+**Phase 2** — WinGet DSC applies + imperative Windows tweaks (registry, optional features, settings).
 
-If you prefer to download the script first:
+### Software installed via DSC
+
+Defined in [`rpbush.dev.dsc.yml`](rpbush.dev.dsc.yml) and [`rpbush.office.dsc.yml`](rpbush.office.dsc.yml). Fork and trim if you don't want these.
+
+| Category | Packages |
+|---|---|
+| Dev tools | Git, GitHub CLI, PowerShell 7, Windows Terminal, Cursor, Notepad++, 7zip |
+| Productivity | Microsoft Office, Microsoft Teams, Adobe Acrobat Reader, PowerToys |
+| Communication | Signal |
+| Gaming / media | Steam, HandBrake, balenaEtcher |
+| Hardware utilities | Corsair iCUE 5, Sound Blaster Command, Garmin Express, Ubiquiti Identity Desktop, Ubiquiti WiFiman Desktop |
+| Creative / VPN | Adobe Creative Cloud, PrivadoVPN |
+| Storage | Dev Drive (75GB ReFS on disk 0, drive letter Z:) |
+
+### Additional setup done by boot.ps1
+
+- Enables WSL + Virtual Machine Platform, installs Ubuntu
+- Enables Windows Sandbox and NFS Client (Pro+ only) optional features
+- Sets PowerShell 7 as the default Windows Terminal profile
+- Power profile → Ultimate Performance (falls back to High Performance)
+- File Explorer → show hidden files / folders / drives
+- System tray → always show all icons
+- Outlook AutoDiscover registry hints for zero-config Exchange
+- Attempts Windows HWID/digital-license activation via `slmgr`
+- Upgrades WinGet to the Microsoft Store version (for auto-updates) at the end
+
+### Important notes
+
+- DSC configurations are fetched from `https://raw.githubusercontent.com/rpbush/workstation-setup/main/`. If the YAML files are present next to `boot.ps1`, they're used locally instead — useful for offline reruns after the post-NFS reboot.
+- WinGet handles UAC elevation prompts itself; the script is designed to run non-elevated. If you launch it elevated it will warn but try to continue.
+- The Microsoft Account sign-in step opens `ms-settings:emailandaccounts` and waits for a keypress — this is interactive by design (no headless API for MSA sign-in).
+
+### Alternative: download and run locally
 
 ```powershell
-# Create temp directory and change to it
 New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null
 Set-Location "C:\temp"
-
-# Download the script
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rpbush/workstation-setup/main/boot.ps1" -OutFile "C:\temp\boot.ps1"
-
-# Run the script
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 & "C:\temp\boot.ps1"
 ```
 
-## Publishing to GitHub
+To resume manually after a reboot: `& "C:\ProgramData\WorkstationSetup\boot.ps1" -ResumeAfterReboot`
 
-To publish this project to GitHub:
+### Running from a fork
 
-1. Create a new repository on GitHub (e.g., `workstation-setup`)
-2. Initialize git in the Workstation_Setup directory:
-   ```powershell
-   cd Workstation_Setup
-   git init
-   git add .
-   git commit -m "Initial commit: Workstation setup script"
-   ```
-3. Add your GitHub repository as remote:
-   ```powershell
-   git remote add origin https://github.com/rpbush/workstation-setup.git
-   git branch -M main
-   git push -u origin main
-   ```
+`boot.ps1` accepts `-RepoOwner`, `-RepoName`, and `-RepoBranch` parameters; the DSC YAMLs are downloaded from `https://raw.githubusercontent.com/<owner>/<name>/<branch>/`. Defaults are `rpbush` / `workstation-setup` / `main`. After cloning your fork:
 
-### Repository Structure
-
-```
-Workstation_Setup/
-├── boot.ps1                    # Main setup script
-├── readme.md                   # This file
-├── LICENSE                     # License file
-├── rpbush.dev.dsc.yml          # Dev environment DSC configuration
-├── rpbush.nonAdmin.dsc.yml     # Non-admin DSC configuration
-├── rpbush.office.dsc.yml       # Office DSC configuration
-└── MAS_AIO.cmd                 # Windows activation tool (optional)
+```powershell
+& .\boot.ps1 -RepoOwner "your-user" -RepoName "your-fork" -RepoBranch "main"
 ```
 
-## Manual Setup (Legacy Method):
+If you run from a directory where the DSC YAMLs sit next to `boot.ps1`, those local copies win and no download happens.
 
-1. Open Windows PowerShell (as Administrator)
-2. Set execution policy: `Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force`
-3. Copy boot.ps1 to your user folder
-4. Run `.\boot.ps1`
-5. Reset execution policy if desired: `Set-ExecutionPolicy -ExecutionPolicy Default -Scope Process -Force`
+### Other switches
 
-## TO-DO list
+- `-Unattended` — auto-reboot after NFS install, skip the interactive Microsoft Account sign-in step.
+- `-ResumeAfterReboot` — set automatically by the post-reboot RunOnce hook; rarely passed by hand.
+
+## Repository structure
+
+```
+workstation-setup/
+├── boot.ps1                # Main setup script
+├── rpbush.dev.dsc.yml      # WinGet DSC: dev apps + Dev Drive
+├── rpbush.office.dsc.yml   # WinGet DSC: Office + Teams
+├── CLAUDE.md               # Architecture notes for AI assistants
+├── LICENSE
+└── readme.md
+```
