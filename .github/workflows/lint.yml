@@ -15,11 +15,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install PSScriptAnalyzer
+      - name: Install PSScriptAnalyzer + powershell-yaml
         shell: pwsh
         run: |
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
           Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          Install-Module -Name powershell-yaml -Force -Scope CurrentUser
 
       - name: Lint boot.ps1
         shell: pwsh
@@ -29,15 +30,14 @@ jobs:
       - name: Validate DSC YAML files
         shell: pwsh
         run: |
-          # Use Python + PyYAML (preinstalled on windows-latest) for YAML validation.
-          # Avoids an extra PSGallery dependency (powershell-yaml) and produces a
-          # clean non-zero exit on parse failure.
+          Import-Module powershell-yaml
           $files = @('rpbush.dev.dsc.yml', 'rpbush.office.dsc.yml')
           foreach ($f in $files) {
               Write-Host "Validating $f"
-              python -c "import yaml, sys; yaml.safe_load(open(sys.argv[1], encoding='utf-8'))" $f
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "YAML validation failed for $f"
+              try {
+                  $null = Get-Content $f -Raw | ConvertFrom-Yaml
+              } catch {
+                  Write-Error "YAML validation failed for $f`: $_"
                   exit 1
               }
           }
